@@ -73,7 +73,7 @@ python worker.py
 
 Worker memakai seluruh core CPU yang terdeteksi secara default. Biarkan terminal dan proses Worker tetap aktif.
 
-Worker membatasi penerimaan task aktif sesuai jumlah slot prosesnya. Jika semua slot sedang digunakan—misalnya oleh Master lain—Worker menjawab `busy` sementara. Master menunggu lalu mencoba kembali task tersebut; status busy dan lama menunggunya terlihat pada terminal dan laporan benchmark.
+Worker membatasi penerimaan task aktif sesuai jumlah slot prosesnya. Jika semua slot sedang digunakan—misalnya oleh Master lain—Worker menjawab `busy` dan Master langsung menolak/membatalkan job tanpa menunggu atau mengalihkan task diam-diam.
 
 Setelah Worker aktif, pada komputer Master jalankan `python master.py`. Master akan memindai Worker, menampilkan daftar perangkat, lalu meminta path gambar, faktor skala, mode pemrosesan, pilihan Worker, dan scheduler. Path gambar harus menunjuk ke file yang ada di komputer Master, misalnya `before/anime.png`.
 

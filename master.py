@@ -18,6 +18,10 @@ from image_pipeline import checksum, process_slice, read_image, save_image
 from protocol import recv_bytes, recv_json, send_bytes, send_json
 
 
+class WorkerBusyError(RuntimeError):
+    """Worker explicitly rejected a task because all of its slots are occupied."""
+
+
 def scale_arg(value: str) -> float:
     scale = float(value)
     if not MIN_SCALE <= scale <= MAX_SCALE:
@@ -72,42 +76,33 @@ def discover_workers(timeout: float = 1.5) -> list[dict]:
 def remote_task(worker: dict, task: dict, scale: float) -> tuple[dict, np.ndarray]:
     image = task["image"]
     task_started = time.perf_counter()
-    deadline = time.monotonic() + SOCKET_TIMEOUT
-    connect_seconds = upload_seconds = busy_wait_seconds = 0.0
+    connect_started = time.perf_counter()
+    connect_seconds = upload_seconds = 0.0
     payload = np.ascontiguousarray(image).tobytes()
-    while True:
-        connect_started = time.perf_counter()
-        with socket.create_connection((worker["ip"], worker["port"]), timeout=SOCKET_TIMEOUT) as sock:
-            connect_seconds += time.perf_counter() - connect_started
-            sock.settimeout(SOCKET_TIMEOUT)
-            send_json(sock, {"version": PROTOCOL_VERSION, "task_id": task["id"], "shape": list(image.shape), "scale": scale, "checksum": checksum(image)})
-            acknowledgement = recv_json(sock)
-            if acknowledgement.get("busy"):
-                delay = min(float(acknowledgement.get("retry_after", 0.5)), max(0.0, deadline - time.monotonic()))
-                busy_wait_seconds += delay
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"worker {worker['host']} remained busy past task timeout")
-                print(f"[WORKER BUSY] {worker['host']} has no free slot; retrying task {task['id'][:8]} in {delay:.1f}s")
-                time.sleep(delay)
-                continue
-            if not acknowledgement.get("accepted"):
-                raise RuntimeError(acknowledgement.get("error", "worker rejected task"))
-            upload_started = time.perf_counter()
-            send_bytes(sock, payload)
-            upload_seconds += time.perf_counter() - upload_started
-            response_started = time.perf_counter()
-            response = recv_json(sock)
-            if not response.get("ok"):
-                raise RuntimeError(response.get("error", "worker failed"))
-            response_wait_seconds = time.perf_counter() - response_started
-            download_started = time.perf_counter()
-            raw = recv_bytes(sock)
-            download_seconds = time.perf_counter() - download_started
-        break
+    with socket.create_connection((worker["ip"], worker["port"]), timeout=SOCKET_TIMEOUT) as sock:
+        connect_seconds = time.perf_counter() - connect_started
+        sock.settimeout(SOCKET_TIMEOUT)
+        send_json(sock, {"version": PROTOCOL_VERSION, "task_id": task["id"], "shape": list(image.shape), "scale": scale, "checksum": checksum(image)})
+        acknowledgement = recv_json(sock)
+        if acknowledgement.get("busy"):
+            raise WorkerBusyError(f"{worker['host']} rejected task: all process slots are busy")
+        if not acknowledgement.get("accepted"):
+            raise RuntimeError(acknowledgement.get("error", "worker rejected task"))
+        upload_started = time.perf_counter()
+        send_bytes(sock, payload)
+        upload_seconds = time.perf_counter() - upload_started
+        response_started = time.perf_counter()
+        response = recv_json(sock)
+        if not response.get("ok"):
+            raise RuntimeError(response.get("error", "worker failed"))
+        response_wait_seconds = time.perf_counter() - response_started
+        download_started = time.perf_counter()
+        raw = recv_bytes(sock)
+        download_seconds = time.perf_counter() - download_started
     result = np.frombuffer(raw, dtype=np.uint8).reshape(response["shape"]).copy()
     if checksum(result) != response["checksum"]:
         raise ValueError("result checksum mismatch")
-    response["transport"] = {"connect": connect_seconds, "upload": upload_seconds, "busy_wait": busy_wait_seconds, "worker_wait": response_wait_seconds, "download": download_seconds, "total": time.perf_counter() - task_started, "sent_bytes": len(payload), "received_bytes": len(raw)}
+    response["transport"] = {"connect": connect_seconds, "upload": upload_seconds, "busy_wait": 0.0, "worker_wait": response_wait_seconds, "download": download_seconds, "total": time.perf_counter() - task_started, "sent_bytes": len(payload), "received_bytes": len(raw)}
     return response, result
 
 
@@ -238,6 +233,10 @@ def main() -> None:
                         lost = False
                         try:
                             response, part = future.result()
+                        except WorkerBusyError as busy_error:
+                            line = f"[REJECTED] task={task['id']} worker={worker['host']}@{worker['ip']} reason=busy; job aborted without waiting or rerouting"
+                            print(line); failure_events.append(line)
+                            raise RuntimeError(line) from busy_error
                         except Exception as first_error:
                             failed_worker = worker
                             failure_line = f"[TASK FAILED] task={task['id']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}"
@@ -268,10 +267,11 @@ def main() -> None:
                                     print(f"[RECOVERED] task={task['id']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
                         if not lost:
                             transport = response.get("transport", {})
-                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "worker_elapsed": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0})
+                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "task_total": 0.0, "worker_elapsed": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0})
                             stats["tasks"] += 1
                             stats["compute"] += float(response.get("compute_seconds", 0.0))
                             stats["worker_elapsed"] += float(response.get("worker_elapsed", 0.0))
+                            stats["task_total"] += float(transport.get("total", 0.0))
                             for key in ("connect", "upload", "busy_wait", "worker_wait", "download"):
                                 stats[key] += float(transport.get(key, 0.0))
                             stats["network_bytes_in"] += int(transport.get("sent_bytes", task["image"].nbytes))
@@ -314,20 +314,20 @@ def main() -> None:
         print(analysis)
         report.extend([f"Sequential baseline: {baseline_seconds:.6f}s", f"Speedup: {speedup:.6f}x", f"Efficiency: {efficiency:.3f}% (P={parallelism})"])
     if worker_stats:
-        header = f"{'WORKER':<22} {'TASKS':>5} {'COMPUTE':>9} {'UPLOAD':>9} {'BUSY':>8} {'WAIT':>9} {'DOWNLOAD':>9} {'AVG CPU':>9} {'AVG MEM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
+        header = f"{'WORKER':<22} {'TASKS':>5} {'COMPUTE':>9} {'UPLOAD':>9} {'DOWNLOAD':>9} {'TOTAL TIME':>11} {'AVG CPU':>9} {'AVG MEM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
         print("\n[WORKER ANALYSIS]")
         print(header)
         report.extend(["", "WORKER PERFORMANCE", header])
         for stat in worker_stats.values():
             avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
             avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
-            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['compute']:>8.3f}s {stat['upload']:>8.3f}s {stat['busy_wait']:>7.3f}s {stat['worker_wait']:>8.3f}s {stat['download']:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
+            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['compute']:>8.3f}s {stat['upload']:>8.3f}s {stat['download']:>8.3f}s {stat['task_total']:>10.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
             print(row); report.append(row)
-    task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'CONNECT':>9} {'UPLOAD':>9} {'BUSY WAIT':>10} {'WORKER WAIT':>12} {'COMPUTE':>9} {'DOWNLOAD':>9} {'TOTAL':>9}"
+    task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'UPLOAD':>9} {'COMPUTE':>9} {'DOWNLOAD':>9} {'TOTAL TIME':>11}"
     print("\n[TASK TIMINGS]"); print(task_header)
     report.extend(["", "TASK TIMINGS", task_header])
     for item in task_details:
-        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {item['connect']:>8.3f}s {item['upload']:>8.3f}s {item['busy_wait']:>9.3f}s {item['worker_wait']:>11.3f}s {item['compute']:>8.3f}s {item['download']:>8.3f}s {item['total']:>8.3f}s"
+        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {item['upload']:>8.3f}s {item['compute']:>8.3f}s {item['download']:>8.3f}s {item['total']:>10.3f}s"
         print(row); report.append(row)
     recovery_line = f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s"
     print("\n" + recovery_line); report.append(recovery_line)
