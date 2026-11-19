@@ -1,0 +1,12 @@
+# Python runtime artifacts
+__pycache__/
+.venv/
+*.pyc
+
+# Generated image outputs and local Nix build links
+after/*
+result
+result-*
+
+# Assignment source material and large unrelated report files
+/konteks/
