@@ -15,16 +15,18 @@ from image_pipeline import checksum, process_slice
 from protocol import recv_bytes, recv_json, send_bytes, send_json
 
 
-def _process(payload: bytes, shape: tuple[int, ...], scale: float) -> tuple[bytes, tuple[int, ...], str]:
+def _process(payload: bytes, shape: tuple[int, ...], scale: float) -> tuple[bytes, tuple[int, ...], str, float]:
+    started = time.perf_counter()
     image = np.frombuffer(payload, dtype=np.uint8).reshape(shape).copy()
     result = process_slice(image, scale)
     result_bytes = np.ascontiguousarray(result).tobytes()
-    return result_bytes, result.shape, checksum(result)
+    return result_bytes, result.shape, checksum(result), time.perf_counter() - started
 
 
-def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futures.ProcessPoolExecutor) -> None:
+def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futures.ProcessPoolExecutor, capacity: threading.BoundedSemaphore) -> None:
     with conn:
         conn.settimeout(SOCKET_TIMEOUT)
+        reserved = False
         try:
             request = recv_json(conn)
             if request.get("action") == "info":
@@ -32,6 +34,12 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
                 return
             if request.get("version") != PROTOCOL_VERSION:
                 raise ValueError("unsupported protocol version")
+            if not capacity.acquire(blocking=False):
+                send_json(conn, {"ok": False, "busy": True, "retry_after": 0.5, "error": "all worker process slots are busy"})
+                print(f"[WORKER][BUSY] rejected temporarily master={address[0]} task={request.get('task_id')}", flush=True)
+                return
+            reserved = True
+            send_json(conn, {"ok": True, "accepted": True})
             payload = recv_bytes(conn)
             if checksum(np.frombuffer(payload, dtype=np.uint8)) != request["checksum"]:
                 raise ValueError("input checksum mismatch")
@@ -48,10 +56,10 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
                 if time.perf_counter() - started > SOCKET_TIMEOUT:
                     future.cancel()
                     raise TimeoutError("worker computation timed out")
-            output, shape, digest = future.result()
+            output, shape, digest, compute_seconds = future.result()
             avg_cpu = sum(x[0] for x in samples) / len(samples) if samples else 0.0
             avg_mem = sum(x[1] for x in samples) / len(samples) if samples else psutil.virtual_memory().percent
-            send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "compute_seconds": time.perf_counter() - started, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
+            send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "worker_elapsed": time.perf_counter() - started, "compute_seconds": compute_seconds, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
             send_bytes(conn, output)
             print(f"[WORKER] task={request['task_id']} master={address[0]} input={len(payload)}B output={len(output)}B checksum={digest}", flush=True)
         except Exception as exc:
@@ -60,10 +68,13 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
                 send_json(conn, {"ok": False, "error": str(exc)})
             except OSError:
                 pass
+        finally:
+            if reserved:
+                capacity.release()
 
 
 def run(bind: str, port: int, processes: int) -> None:
-    import threading
+    capacity = threading.BoundedSemaphore(processes)
 
     def discovery() -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
@@ -86,7 +97,7 @@ def run(bind: str, port: int, processes: int) -> None:
             print(f"[WORKER] {socket.gethostname()} listening {bind}:{port}, processes={processes}", flush=True)
             while True:
                 conn, addr = server.accept()
-                threading.Thread(target=handle, args=(conn, addr, pool), daemon=True).start()
+                threading.Thread(target=handle, args=(conn, addr, pool, capacity), daemon=True).start()
 
 
 def main() -> None:

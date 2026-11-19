@@ -73,6 +73,8 @@ python worker.py
 
 Worker memakai seluruh core CPU yang terdeteksi secara default. Biarkan terminal dan proses Worker tetap aktif.
 
+Worker membatasi penerimaan task aktif sesuai jumlah slot prosesnya. Jika semua slot sedang digunakan—misalnya oleh Master lain—Worker menjawab `busy` sementara. Master menunggu lalu mencoba kembali task tersebut; status busy dan lama menunggunya terlihat pada terminal dan laporan benchmark.
+
 Setelah Worker aktif, pada komputer Master jalankan `python master.py`. Master akan memindai Worker, menampilkan daftar perangkat, lalu meminta path gambar, faktor skala, mode pemrosesan, pilihan Worker, dan scheduler. Path gambar harus menunjuk ke file yang ada di komputer Master, misalnya `before/anime.png`.
 
 Mode pemrosesan:
@@ -88,7 +90,7 @@ Scheduler:
 
 Setelah memilih scheduler, Master menanyakan apakah fault tolerance diaktifkan. Jika **tidak**, task yang gagal tidak di-retry; task lain tetap diproses dan gambar parsial disimpan dengan area task gagal berwarna magenta. Jika **ya**, Master mencoba retry ke Worker lain dan mencetak ID task, Worker asal dan alasan gagal, Worker tujuan, serta waktu recovery. Jika retry ke semua Worker lain gagal, area task tersebut ditandai magenta dan hasil parsial tetap disimpan.
 
-Output gambar disimpan di `after/`. Untuk mode local-parallel dan distributed, Master juga menjalankan sequential baseline pada input yang sama. Terminal menampilkan execution time, speedup, efficiency, throughput, waktu komputasi dan jumlah task per Worker, rata-rata CPU/memory Worker, jumlah retry, serta recovery time. CPU dan memory Worker diambil saat task berjalan; task yang sangat singkat mungkin menghasilkan sedikit sampel.
+Output gambar disimpan di `after/`. Untuk mode local-parallel dan distributed, Master juga menjalankan sequential baseline pada input yang sama. Terminal menampilkan execution time, speedup, efficiency, throughput, waktu komputasi per Worker/task, waktu koneksi/upload/wait/download, ukuran transfer, rata-rata CPU/memory Worker, jumlah retry, serta recovery time. Laporan teks otomatis dibuat di `logs/` dengan nama berisi hostname Master, resolusi, skala, mode, scheduler, jumlah Worker, dan waktu run.
 
 ## 5. Uji fault tolerance
 

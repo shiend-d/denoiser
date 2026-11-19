@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import ipaddress
 import json
 import multiprocessing
 import socket
@@ -10,6 +11,7 @@ import uuid
 from pathlib import Path
 
 import numpy as np
+import psutil
 
 from config import DEFAULT_PORT, DISCOVERY_PORT, MAX_SCALE, MIN_SCALE, PROTOCOL_VERSION, SOCKET_TIMEOUT
 from image_pipeline import checksum, process_slice, read_image, save_image
@@ -31,36 +33,81 @@ def worker_info(host: str, port: int) -> dict:
 
 def discover_workers(timeout: float = 1.5) -> list[dict]:
     found: dict[str, dict] = {}
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(0.2)
-        for target in ("255.255.255.255", "<broadcast>"):
-            try: sock.sendto(b"DISCOVER_UPSCAYL_WORKERS_V1", (target, DISCOVERY_PORT))
-            except OSError: pass
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+    interfaces: list[tuple[str, str]] = []
+    for addresses in psutil.net_if_addrs().values():
+        for address in addresses:
+            if address.family != socket.AF_INET or not address.address or not address.netmask:
+                continue
             try:
-                raw, addr = sock.recvfrom(2048)
-                info = __import__("json").loads(raw.decode())
-                if info.get("protocol") == PROTOCOL_VERSION:
-                    found[addr[0]] = info | {"ip": addr[0]}
-            except socket.timeout: pass
+                ip = ipaddress.IPv4Address(address.address)
+                if ip.is_loopback or ip.is_link_local:
+                    continue
+                network = ipaddress.IPv4Network(f"{address.address}/{address.netmask}", strict=False)
+                interfaces.append((address.address, str(network.broadcast_address)))
+            except ValueError:
+                continue
+    targets = {(None, "255.255.255.255"), *interfaces}
+    for local_ip, broadcast_ip in targets:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.settimeout(0.2)
+                if local_ip:
+                    sock.bind((local_ip, 0))
+                sock.sendto(b"DISCOVER_UPSCAYL_WORKERS_V1", (broadcast_ip, DISCOVERY_PORT))
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    try:
+                        raw, addr = sock.recvfrom(2048)
+                        info = json.loads(raw.decode())
+                        if info.get("protocol") == PROTOCOL_VERSION:
+                            found[addr[0]] = info | {"ip": addr[0]}
+                    except socket.timeout:
+                        continue
+        except OSError as exc:
+            print(f"[DISCOVERY] broadcast {broadcast_ip} via {local_ip or 'default route'} failed: {exc}")
     return list(found.values())
 
 
 def remote_task(worker: dict, task: dict, scale: float) -> tuple[dict, np.ndarray]:
     image = task["image"]
-    with socket.create_connection((worker["ip"], worker["port"]), timeout=SOCKET_TIMEOUT) as sock:
-        sock.settimeout(SOCKET_TIMEOUT)
-        send_json(sock, {"version": PROTOCOL_VERSION, "task_id": task["id"], "shape": list(image.shape), "scale": scale, "checksum": checksum(image)})
-        send_bytes(sock, np.ascontiguousarray(image).tobytes())
-        response = recv_json(sock)
-        if not response.get("ok"):
-            raise RuntimeError(response.get("error", "worker failed"))
-        raw = recv_bytes(sock)
+    task_started = time.perf_counter()
+    deadline = time.monotonic() + SOCKET_TIMEOUT
+    connect_seconds = upload_seconds = busy_wait_seconds = 0.0
+    payload = np.ascontiguousarray(image).tobytes()
+    while True:
+        connect_started = time.perf_counter()
+        with socket.create_connection((worker["ip"], worker["port"]), timeout=SOCKET_TIMEOUT) as sock:
+            connect_seconds += time.perf_counter() - connect_started
+            sock.settimeout(SOCKET_TIMEOUT)
+            send_json(sock, {"version": PROTOCOL_VERSION, "task_id": task["id"], "shape": list(image.shape), "scale": scale, "checksum": checksum(image)})
+            acknowledgement = recv_json(sock)
+            if acknowledgement.get("busy"):
+                delay = min(float(acknowledgement.get("retry_after", 0.5)), max(0.0, deadline - time.monotonic()))
+                busy_wait_seconds += delay
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"worker {worker['host']} remained busy past task timeout")
+                print(f"[WORKER BUSY] {worker['host']} has no free slot; retrying task {task['id'][:8]} in {delay:.1f}s")
+                time.sleep(delay)
+                continue
+            if not acknowledgement.get("accepted"):
+                raise RuntimeError(acknowledgement.get("error", "worker rejected task"))
+            upload_started = time.perf_counter()
+            send_bytes(sock, payload)
+            upload_seconds += time.perf_counter() - upload_started
+            response_started = time.perf_counter()
+            response = recv_json(sock)
+            if not response.get("ok"):
+                raise RuntimeError(response.get("error", "worker failed"))
+            response_wait_seconds = time.perf_counter() - response_started
+            download_started = time.perf_counter()
+            raw = recv_bytes(sock)
+            download_seconds = time.perf_counter() - download_started
+        break
     result = np.frombuffer(raw, dtype=np.uint8).reshape(response["shape"]).copy()
     if checksum(result) != response["checksum"]:
         raise ValueError("result checksum mismatch")
+    response["transport"] = {"connect": connect_seconds, "upload": upload_seconds, "busy_wait": busy_wait_seconds, "worker_wait": response_wait_seconds, "download": download_seconds, "total": time.perf_counter() - task_started, "sent_bytes": len(payload), "received_bytes": len(raw)}
     return response, result
 
 
@@ -131,6 +178,9 @@ def main() -> None:
         baseline_seconds = time.perf_counter() - baseline_started
         print(f"[BENCHMARK] sequential={baseline_seconds:.3f}s checksum={checksum(sequential_result)}")
     worker_stats: dict[str, dict] = {}
+    task_details: list[dict] = []
+    failure_events: list[str] = []
+    workers: list[dict] = []
     recovery_seconds = 0.0
     failed_tasks: list[dict] = []
     started = time.perf_counter()
@@ -190,7 +240,8 @@ def main() -> None:
                             response, part = future.result()
                         except Exception as first_error:
                             failed_worker = worker
-                            print(f"[TASK FAILED] task={task['id']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}")
+                            failure_line = f"[TASK FAILED] task={task['id']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}"
+                            print(failure_line); failure_events.append(failure_line)
                             workers = [w for w in workers if w["ip"] != failed_worker["ip"]]
                             slots = [w for w in slots if w["ip"] != failed_worker["ip"]]
                             if not args.fault_tolerance:
@@ -201,11 +252,13 @@ def main() -> None:
                                 recovered = False
                                 for candidate in workers:
                                     if candidate["ip"] == failed_worker["ip"]: continue
-                                    print(f"[RETRY] task={task['id']} rerouted {failed_worker['host']} -> {candidate['host']}")
+                                    retry_line = f"[RETRY] task={task['id']} rerouted {failed_worker['host']} -> {candidate['host']}@{candidate['ip']}"
+                                    print(retry_line); failure_events.append(retry_line)
                                     try:
                                         response, part = remote_task(candidate, task, args.scale); worker = candidate; recovered = True; retried = True; break
                                     except Exception as retry_error:
-                                        print(f"[RETRY FAILED] task={task['id']} worker={candidate['host']} reason={type(retry_error).__name__}: {retry_error}")
+                                        retry_error_line = f"[RETRY FAILED] task={task['id']} worker={candidate['host']} reason={type(retry_error).__name__}: {retry_error}"
+                                        print(retry_error_line); failure_events.append(retry_error_line)
                                 if not recovered:
                                     failed_tasks.append(task); lost = True
                                     print(f"[PARTIAL] task={task['id']} has no available retry destination; output region will be highlighted")
@@ -214,14 +267,22 @@ def main() -> None:
                                     recovery_seconds += task_recovery
                                     print(f"[RECOVERED] task={task['id']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
                         if not lost:
-                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0})
+                            transport = response.get("transport", {})
+                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "worker_elapsed": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0})
                             stats["tasks"] += 1
                             stats["compute"] += float(response.get("compute_seconds", 0.0))
+                            stats["worker_elapsed"] += float(response.get("worker_elapsed", 0.0))
+                            for key in ("connect", "upload", "busy_wait", "worker_wait", "download"):
+                                stats[key] += float(transport.get(key, 0.0))
+                            stats["network_bytes_in"] += int(transport.get("sent_bytes", task["image"].nbytes))
+                            stats["network_bytes_out"] += int(transport.get("received_bytes", 0))
                             stats["cpu"].append(float(response.get("cpu_percent", 0.0)))
                             stats["memory"].append(float(response.get("memory_percent", 0.0)))
                             stats["bytes"] += int(task["image"].nbytes)
                             stats["retries"] += int(retried)
-                            print(f"[TASK] {task['id'][:8]} -> {worker['host']} compute={response.get('compute_seconds', 0):.2f}s cpu={response.get('cpu_percent', 0):.1f}% mem={response.get('memory_percent', 0):.1f}% retried={retried}")
+                            detail = {"id": task["id"], "worker": worker["host"], "rows": f"{task['y']}..{task['end']-1}", "bytes_in": transport.get("sent_bytes", task["image"].nbytes), "bytes_out": transport.get("received_bytes", 0), "connect": transport.get("connect", 0), "upload": transport.get("upload", 0), "busy_wait": transport.get("busy_wait", 0), "worker_wait": transport.get("worker_wait", 0), "compute": response.get("compute_seconds", 0), "download": transport.get("download", 0), "total": transport.get("total", 0), "retried": retried}
+                            task_details.append(detail)
+                            print(f"[TASK] {task['id'][:8]} -> {worker['host']} rows={detail['rows']} connect={detail['connect']:.3f}s upload={detail['upload']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s download={detail['download']:.3f}s in={detail['bytes_in']/1e6:.2f}MB out={detail['bytes_out']/1e6:.2f}MB")
                             top = round((task["y"] - task["lo"]) * args.scale); bottom = round((task["end"] - task["lo"]) * args.scale)
                             pieces[task["y"]] = part[top:bottom]
                             completed += 1
@@ -242,18 +303,41 @@ def main() -> None:
     save_image(path, result)
     status = "PARTIAL" if failed_tasks else "COMPLETE"
     print(f"[MASTER] status={status} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
-    print(f"[METRICS] mode={args.mode} scheduler={args.scheduler} workers={len(workers) if args.mode == 'distributed' else 0} seconds={elapsed:.6f} throughput={h * w / elapsed:.2f} input_pixels/s")
+    throughput = h * w / elapsed if elapsed else 0.0
+    print(f"[METRICS] mode={args.mode} scheduler={args.scheduler} workers={len(workers) if args.mode == 'distributed' else 0} execution={elapsed:.3f}s throughput={throughput:.2f} input-pixels/s")
+    report = ["Distributed Image Upscaler - Benchmark Report", f"Master: {socket.gethostname()}", f"Input: {args.input}", f"Resolution: {w}x{h}", f"Scale: {args.scale}x", f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}", f"Output: {path}", f"Execution time: {elapsed:.6f}s", f"Throughput: {throughput:.3f} input-pixels/s"]
     if baseline_seconds is not None:
         parallelism = len(workers) if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
         speedup = baseline_seconds / elapsed if elapsed else 0.0
-        print(f"[ANALYSIS] T_seq={baseline_seconds:.3f}s T_run={elapsed:.3f}s speedup={speedup:.3f}x efficiency={speedup / max(1, parallelism) * 100:.2f}% P={parallelism}")
+        efficiency = speedup / max(1, parallelism) * 100
+        analysis = f"[ANALYSIS] T_seq={baseline_seconds:.3f}s T_run={elapsed:.3f}s speedup={speedup:.3f}x efficiency={efficiency:.2f}% P={parallelism}"
+        print(analysis)
+        report.extend([f"Sequential baseline: {baseline_seconds:.6f}s", f"Speedup: {speedup:.6f}x", f"Efficiency: {efficiency:.3f}% (P={parallelism})"])
     if worker_stats:
-        print("[WORKER ANALYSIS] host | tasks | compute total | avg CPU | avg memory | input data | retries")
+        header = f"{'WORKER':<22} {'TASKS':>5} {'COMPUTE':>9} {'UPLOAD':>9} {'BUSY':>8} {'WAIT':>9} {'DOWNLOAD':>9} {'AVG CPU':>9} {'AVG MEM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
+        print("\n[WORKER ANALYSIS]")
+        print(header)
+        report.extend(["", "WORKER PERFORMANCE", header])
         for stat in worker_stats.values():
             avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
             avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
-            print(f"  {stat['host']} | {stat['tasks']} | {stat['compute']:.3f}s | {avg_cpu:.1f}% | {avg_mem:.1f}% | {stat['bytes']/1e6:.2f}MB | {stat['retries']}")
-    print(f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s")
+            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['compute']:>8.3f}s {stat['upload']:>8.3f}s {stat['busy_wait']:>7.3f}s {stat['worker_wait']:>8.3f}s {stat['download']:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
+            print(row); report.append(row)
+    task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'CONNECT':>9} {'UPLOAD':>9} {'BUSY WAIT':>10} {'WORKER WAIT':>12} {'COMPUTE':>9} {'DOWNLOAD':>9} {'TOTAL':>9}"
+    print("\n[TASK TIMINGS]"); print(task_header)
+    report.extend(["", "TASK TIMINGS", task_header])
+    for item in task_details:
+        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {item['connect']:>8.3f}s {item['upload']:>8.3f}s {item['busy_wait']:>9.3f}s {item['worker_wait']:>11.3f}s {item['compute']:>8.3f}s {item['download']:>8.3f}s {item['total']:>8.3f}s"
+        print(row); report.append(row)
+    recovery_line = f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s"
+    print("\n" + recovery_line); report.append(recovery_line)
+    report.extend(failure_events)
+    log_dir = Path("logs"); log_dir.mkdir(parents=True, exist_ok=True)
+    safe_master = "".join(c if c.isalnum() or c in "-_" else "_" for c in socket.gethostname())
+    log_name = f"{safe_master}_{w}x{h}_{args.scale:.1f}x_{args.mode}_{args.scheduler}_{len(workers) if args.mode == 'distributed' else 0}workers_{time.strftime('%Y%m%d-%H%M%S')}.txt"
+    log_path = log_dir / log_name
+    log_path.write_text("\n".join(report) + "\n", encoding="utf-8")
+    print(f"[LOG] benchmark report saved: {log_path}")
 
 
 if __name__ == "__main__":
