@@ -8,26 +8,27 @@ Salin folder proyek ke komputer Master dan setiap komputer Worker. Semua kompute
 
 ## 2. Instal dependensi
 
-Pasang dependensi di Master dan setiap Worker.
+Pasang dependensi di Master dan setiap Worker. Jalankan perintah instalasi dan aplikasi dengan interpreter Python yang sama. `requirements.txt` mencakup NumPy, OpenCV, Pillow, dan psutil.
 
-### NixOS
+### Linux (termasuk NixOS)
 
-Dari folder proyek, aktifkan environment yang disediakan:
+Untuk NixOS, `nix develop` menyediakan Python dan pustaka sistem proyek. Setelah masuk ke dev shell, instal dependensi Python:
 
 ```bash
 nix develop
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-Jalankan `python worker.py` atau `python master.py` dari shell tersebut.
-
-### Linux lain
+Di distribusi Linux lain, lewati `nix develop` lalu jalankan empat perintah berikut dari folder proyek:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -c "import numpy, cv2, PIL; print('Dependencies ready')"
 ```
 
 ### Windows PowerShell
@@ -37,10 +38,15 @@ py -3.14 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -c "import numpy, cv2, PIL; print('Dependencies ready')"
 ```
 
-Jika PowerShell menolak aktivasi environment, jalankan `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, lalu aktifkan kembali `.venv`.
+Jika PowerShell menolak aktivasi environment, jalankan `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, lalu aktifkan kembali `.venv`. Jika launcher `py -3.14` tidak tersedia, buat environment dengan versi Python yang terpasang menggunakan `python -m venv .venv`.
+
+Verifikasi dependensi pada platform mana pun:
+
+```bash
+python -c "import numpy, cv2, PIL, psutil; print('Dependencies ready')"
+```
 
 ## 3. Siapkan jaringan
 
@@ -62,7 +68,7 @@ New-NetFirewallRule -DisplayName "Upscayl Discovery UDP 5001" -Direction Inbound
 
 ## 4. Jalankan Worker lalu Master
 
-Di setiap komputer Worker, masuk ke folder proyek, aktifkan environment Python yang sudah disiapkan, lalu jalankan:
+Di setiap komputer Worker, masuk ke folder proyek, aktifkan `.venv` jika dibuat, lalu jalankan:
 
 ```bash
 python worker.py
@@ -83,7 +89,7 @@ Scheduler:
 - **Dynamic:** task berikutnya diberikan ke slot Worker yang baru selesai.
 - **Static:** task dibagikan terlebih dahulu ke slot Worker.
 
-Output gambar disimpan di `after/`. Waktu, throughput, checksum, dan status task ditampilkan di terminal.
+Output gambar disimpan di `after/`. Untuk mode local-parallel dan distributed, Master juga menjalankan sequential baseline pada input yang sama. Terminal menampilkan execution time, speedup, efficiency, throughput, waktu komputasi dan jumlah task per Worker, rata-rata CPU/memory Worker, jumlah retry, serta recovery time. CPU dan memory Worker diambil saat task berjalan; task yang sangat singkat mungkin menghasilkan sedikit sampel.
 
 ## 5. Arti simulasi kehilangan Worker
 

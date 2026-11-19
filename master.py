@@ -124,6 +124,15 @@ def main() -> None:
     image = read_image(args.input)
     h, w, _ = image.shape
     print(f"[MASTER] {args.input} {w}x{h} mode={args.mode} scale={args.scale}")
+    baseline_seconds = None
+    if args.mode != "sequential":
+        print("[BENCHMARK] Measuring sequential baseline...")
+        baseline_started = time.perf_counter()
+        sequential_result = process_slice(image, args.scale)
+        baseline_seconds = time.perf_counter() - baseline_started
+        print(f"[BENCHMARK] sequential={baseline_seconds:.3f}s checksum={checksum(sequential_result)}")
+    worker_stats: dict[str, dict] = {}
+    recovery_seconds = 0.0
     started = time.perf_counter()
     if args.mode == "sequential":
         result = process_slice(image, args.scale)
@@ -175,16 +184,27 @@ def main() -> None:
                     done, _ = concurrent.futures.wait(active, return_when=concurrent.futures.FIRST_COMPLETED)
                     for future in done:
                         worker, task = active.pop(future)
+                        retried = False
                         try:
-                            _, part = future.result()
+                            response, part = future.result()
                         except Exception as first_error:
+                            recovery_started = time.perf_counter()
                             recovered = False
                             for candidate in workers:
                                 if candidate["ip"] == worker["ip"]: continue
                                 try:
-                                    _, part = remote_task(candidate, task, args.scale); worker = candidate; recovered = True; break
+                                    response, part = remote_task(candidate, task, args.scale); worker = candidate; recovered = True; retried = True; break
                                 except Exception: continue
                             if not recovered: raise RuntimeError(f"task {task['id']} failed; retry unavailable: {first_error}")
+                            recovery_seconds += time.perf_counter() - recovery_started
+                        stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0})
+                        stats["tasks"] += 1
+                        stats["compute"] += float(response.get("compute_seconds", 0.0))
+                        stats["cpu"].append(float(response.get("cpu_percent", 0.0)))
+                        stats["memory"].append(float(response.get("memory_percent", 0.0)))
+                        stats["bytes"] += int(task["image"].nbytes)
+                        stats["retries"] += int(retried)
+                        print(f"[TASK] {task['id'][:8]} -> {worker['host']} compute={response.get('compute_seconds', 0):.2f}s cpu={response.get('cpu_percent', 0):.1f}% mem={response.get('memory_percent', 0):.1f}% retried={retried}")
                         top = round((task["y"] - task["lo"]) * args.scale); bottom = round((task["end"] - task["lo"]) * args.scale)
                         pieces[task["y"]] = part[top:bottom]
                         completed += 1
@@ -201,6 +221,17 @@ def main() -> None:
     save_image(path, result)
     print(f"[MASTER] output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
     print(f"[METRICS] mode={args.mode} scheduler={args.scheduler} workers={len(workers) if args.mode == 'distributed' else 0} seconds={elapsed:.6f} throughput={h * w / elapsed:.2f} input_pixels/s")
+    if baseline_seconds is not None:
+        parallelism = len(workers) if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
+        speedup = baseline_seconds / elapsed if elapsed else 0.0
+        print(f"[ANALYSIS] T_seq={baseline_seconds:.3f}s T_run={elapsed:.3f}s speedup={speedup:.3f}x efficiency={speedup / max(1, parallelism) * 100:.2f}% P={parallelism}")
+    if worker_stats:
+        print("[WORKER ANALYSIS] host | tasks | compute total | avg CPU | avg memory | input data | retries")
+        for stat in worker_stats.values():
+            avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
+            avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
+            print(f"  {stat['host']} | {stat['tasks']} | {stat['compute']:.3f}s | {avg_cpu:.1f}% | {avg_mem:.1f}% | {stat['bytes']/1e6:.2f}MB | {stat['retries']}")
+    print(f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s")
 
 
 if __name__ == "__main__":

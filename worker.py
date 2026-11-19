@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import multiprocessing
+import threading
 import socket
 import time
 
 import numpy as np
+import psutil
 
 from config import DEFAULT_PORT, DISCOVERY_PORT, PROTOCOL_VERSION, SOCKET_TIMEOUT
 from image_pipeline import checksum, process_slice
@@ -35,8 +37,21 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
                 raise ValueError("input checksum mismatch")
             started = time.perf_counter()
             future = pool.submit(_process, payload, tuple(request["shape"]), float(request["scale"]))
-            output, shape, digest = future.result(timeout=SOCKET_TIMEOUT)
-            send_json(conn, {"ok": True, "task_id": request["task_id"], "shape": list(shape), "dtype": "uint8", "checksum": digest, "compute_seconds": time.perf_counter() - started})
+            samples: list[tuple[float, float]] = []
+            proc = psutil.Process()
+            proc.cpu_percent(None)
+            while not future.done():
+                time.sleep(0.25)
+                children = proc.children(recursive=True)
+                cpu = proc.cpu_percent(None) + sum(child.cpu_percent(None) for child in children if child.is_running())
+                samples.append((cpu, psutil.virtual_memory().percent))
+                if time.perf_counter() - started > SOCKET_TIMEOUT:
+                    future.cancel()
+                    raise TimeoutError("worker computation timed out")
+            output, shape, digest = future.result()
+            avg_cpu = sum(x[0] for x in samples) / len(samples) if samples else 0.0
+            avg_mem = sum(x[1] for x in samples) / len(samples) if samples else psutil.virtual_memory().percent
+            send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "compute_seconds": time.perf_counter() - started, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
             send_bytes(conn, output)
             print(f"[WORKER] task={request['task_id']} master={address[0]} input={len(payload)}B output={len(output)}B checksum={digest}", flush=True)
         except Exception as exc:
