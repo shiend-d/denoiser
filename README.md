@@ -10,19 +10,16 @@ Salin folder proyek ke komputer Master dan setiap komputer Worker. Semua kompute
 
 Pasang dependensi di Master dan setiap Worker. Jalankan perintah instalasi dan aplikasi dengan interpreter Python yang sama. `requirements.txt` mencakup NumPy, OpenCV, Pillow, dan psutil.
 
-### Linux (termasuk NixOS)
-
-Untuk NixOS, `nix develop` menyediakan Python dan pustaka sistem proyek. Setelah masuk ke dev shell, instal dependensi Python:
+### NixOS
 
 ```bash
 nix develop
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -c "import numpy, cv2, PIL, psutil; print('Dependencies ready')"
 ```
 
-Di distribusi Linux lain, lewati `nix develop` lalu jalankan empat perintah berikut dari folder proyek:
+`nix develop` sudah menyediakan Python, pustaka native, dan dependensi proyek. Jalankan `python worker.py` pada Worker atau `python master.py` pada Master dari shell tersebut. Jangan aktifkan `.venv` atau install wheel lewat pip di luar dev shell. Jika sebelumnya membuat `.venv`, keluar dari environment itu (`deactivate`), hapus folder `.venv`, buka shell baru, lalu jalankan `nix develop`.
+
+### Linux lain
 
 ```bash
 python3 -m venv .venv
@@ -89,13 +86,13 @@ Scheduler:
 - **Dynamic:** task berikutnya diberikan ke slot Worker yang baru selesai.
 - **Static:** task dibagikan terlebih dahulu ke slot Worker.
 
+Setelah memilih scheduler, Master menanyakan apakah fault tolerance diaktifkan. Jika **tidak**, task yang gagal tidak di-retry; task lain tetap diproses dan gambar parsial disimpan dengan area task gagal berwarna magenta. Jika **ya**, Master mencoba retry ke Worker lain dan mencetak ID task, Worker asal dan alasan gagal, Worker tujuan, serta waktu recovery. Jika retry ke semua Worker lain gagal, area task tersebut ditandai magenta dan hasil parsial tetap disimpan.
+
 Output gambar disimpan di `after/`. Untuk mode local-parallel dan distributed, Master juga menjalankan sequential baseline pada input yang sama. Terminal menampilkan execution time, speedup, efficiency, throughput, waktu komputasi dan jumlah task per Worker, rata-rata CPU/memory Worker, jumlah retry, serta recovery time. CPU dan memory Worker diambil saat task berjalan; task yang sangat singkat mungkin menghasilkan sedikit sampel.
 
-## 5. Arti simulasi kehilangan Worker
+## 5. Uji fault tolerance
 
-Pilihan **Simulate scheduler removing a Worker** hanya menguji perubahan scheduler. Contoh: jika diisi `3`, setelah tiga task selesai Master berhenti memberikan task baru ke Worker yang menyelesaikan task ketiga. Proses Worker tersebut **tidak dimatikan** dan koneksinya **tidak diputus**. Karena itu, pilihan ini bukan bukti fault detection atau recovery dari Worker yang benar-benar gagal.
-
-Untuk uji kegagalan nyata, mulai distributed job dengan cukup banyak task, lalu hentikan proses `worker.py` pada salah satu komputer saat job berlangsung. Master semestinya mendeteksi task yang gagal/timeout dan mencoba mengirim ulang task ke Worker lain. Catat log Master dan Worker sebagai bukti.
+Fault tolerance berbeda dari load balancing. Untuk mengujinya, pilih **Yes** pada prompt fault tolerance, mulai distributed job dengan cukup banyak task, lalu hentikan proses `worker.py` pada salah satu komputer saat job berlangsung. Master mendeteksi task yang gagal/timeout dan mengirim ulang task ke Worker lain. Terminal menunjukkan task dan Worker asal yang gagal serta tujuan pengalihan. Jika retry berhasil, gambar lengkap tersimpan; jika tidak, area yang gagal ditandai magenta. Catat log Master dan Worker sebagai bukti.
 
 ## 6. Skenario evaluasi UAS
 

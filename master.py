@@ -77,8 +77,8 @@ def main() -> None:
     parser.add_argument("--worker", action="append", default=[], metavar="HOST[:PORT]")
     parser.add_argument("--workers", type=int, help="limit discovered workers")
     parser.add_argument("--scheduler", choices=("dynamic", "static"), default="dynamic")
+    parser.add_argument("--fault-tolerance", action=argparse.BooleanOptionalAction, default=None, help="retry failed tasks on another Worker")
     parser.add_argument("--rows-per-task", type=int, default=256)
-    parser.add_argument("--fail-after", type=int, default=0, help="simulate losing a worker after this many completed tasks")
     parser.add_argument("--output", default="after")
     args = parser.parse_args()
     # No-argument launch is the guided terminal interface used for demos.
@@ -116,9 +116,8 @@ def main() -> None:
             args.worker = [f"{w['ip']}:{w['port']}" for w in found]
             print("Scheduler:\n  1) Dynamic: give a free Worker slot another task immediately\n  2) Static: assign all strips to Worker slots before processing")
             args.scheduler = "static" if input("Scheduler [1-2, default 1]: ").strip() == "2" else "dynamic"
-            if args.scheduler == "dynamic" and len(found) > 1 and input("Simulate scheduler removing a Worker after a completed task? (not a real network failure) [y/N]: ").strip().lower() == "y":
-                try: args.fail_after = max(1, int(input("Lose a Worker after how many tasks complete? ").strip()))
-                except ValueError: args.fail_after = 1
+            args.fault_tolerance = input("Enable fault tolerance? [y/N]: ").strip().lower() in ("y", "yes")
+            print("[FAULT TOLERANCE] Enabled: failed tasks retry on another Worker. Disabled: a failed task stops the job; no partial output is saved.")
         print()
     args.mode = args.mode or "distributed"
     image = read_image(args.input)
@@ -133,6 +132,7 @@ def main() -> None:
         print(f"[BENCHMARK] sequential={baseline_seconds:.3f}s checksum={checksum(sequential_result)}")
     worker_stats: dict[str, dict] = {}
     recovery_seconds = 0.0
+    failed_tasks: list[dict] = []
     started = time.perf_counter()
     if args.mode == "sequential":
         result = process_slice(image, args.scale)
@@ -185,41 +185,63 @@ def main() -> None:
                     for future in done:
                         worker, task = active.pop(future)
                         retried = False
+                        lost = False
                         try:
                             response, part = future.result()
                         except Exception as first_error:
-                            recovery_started = time.perf_counter()
-                            recovered = False
-                            for candidate in workers:
-                                if candidate["ip"] == worker["ip"]: continue
-                                try:
-                                    response, part = remote_task(candidate, task, args.scale); worker = candidate; recovered = True; retried = True; break
-                                except Exception: continue
-                            if not recovered: raise RuntimeError(f"task {task['id']} failed; retry unavailable: {first_error}")
-                            recovery_seconds += time.perf_counter() - recovery_started
-                        stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0})
-                        stats["tasks"] += 1
-                        stats["compute"] += float(response.get("compute_seconds", 0.0))
-                        stats["cpu"].append(float(response.get("cpu_percent", 0.0)))
-                        stats["memory"].append(float(response.get("memory_percent", 0.0)))
-                        stats["bytes"] += int(task["image"].nbytes)
-                        stats["retries"] += int(retried)
-                        print(f"[TASK] {task['id'][:8]} -> {worker['host']} compute={response.get('compute_seconds', 0):.2f}s cpu={response.get('cpu_percent', 0):.1f}% mem={response.get('memory_percent', 0):.1f}% retried={retried}")
-                        top = round((task["y"] - task["lo"]) * args.scale); bottom = round((task["end"] - task["lo"]) * args.scale)
-                        pieces[task["y"]] = part[top:bottom]
-                        completed += 1
-                        if args.fail_after and completed == args.fail_after:
-                            workers = [w for w in workers if w["ip"] != worker["ip"]]
-                            slots = [w for w in slots if w["ip"] != worker["ip"]]
-                            print(f"[FAULT] simulated loss of {worker['host']} after task {completed}")
+                            failed_worker = worker
+                            print(f"[TASK FAILED] task={task['id']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}")
+                            workers = [w for w in workers if w["ip"] != failed_worker["ip"]]
+                            slots = [w for w in slots if w["ip"] != failed_worker["ip"]]
+                            if not args.fault_tolerance:
+                                failed_tasks.append(task); lost = True
+                                print(f"[PARTIAL] task={task['id']} marked missing; its output region will be highlighted")
+                            else:
+                                recovery_started = time.perf_counter()
+                                recovered = False
+                                for candidate in workers:
+                                    if candidate["ip"] == failed_worker["ip"]: continue
+                                    print(f"[RETRY] task={task['id']} rerouted {failed_worker['host']} -> {candidate['host']}")
+                                    try:
+                                        response, part = remote_task(candidate, task, args.scale); worker = candidate; recovered = True; retried = True; break
+                                    except Exception as retry_error:
+                                        print(f"[RETRY FAILED] task={task['id']} worker={candidate['host']} reason={type(retry_error).__name__}: {retry_error}")
+                                if not recovered:
+                                    failed_tasks.append(task); lost = True
+                                    print(f"[PARTIAL] task={task['id']} has no available retry destination; output region will be highlighted")
+                                else:
+                                    task_recovery = time.perf_counter() - recovery_started
+                                    recovery_seconds += task_recovery
+                                    print(f"[RECOVERED] task={task['id']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
+                        if not lost:
+                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0})
+                            stats["tasks"] += 1
+                            stats["compute"] += float(response.get("compute_seconds", 0.0))
+                            stats["cpu"].append(float(response.get("cpu_percent", 0.0)))
+                            stats["memory"].append(float(response.get("memory_percent", 0.0)))
+                            stats["bytes"] += int(task["image"].nbytes)
+                            stats["retries"] += int(retried)
+                            print(f"[TASK] {task['id'][:8]} -> {worker['host']} compute={response.get('compute_seconds', 0):.2f}s cpu={response.get('cpu_percent', 0):.1f}% mem={response.get('memory_percent', 0):.1f}% retried={retried}")
+                            top = round((task["y"] - task["lo"]) * args.scale); bottom = round((task["end"] - task["lo"]) * args.scale)
+                            pieces[task["y"]] = part[top:bottom]
+                            completed += 1
                         if args.scheduler == "dynamic" and pending_tasks and slots:
                             submit(worker if worker in slots else slots[0], pending_tasks.pop(0))
                 if pending_tasks: raise RuntimeError("no active Worker slots for pending tasks")
-        result = np.vstack([pieces[y] for y in sorted(pieces)])
+        if failed_tasks:
+            output_shape = (round(h * args.scale), round(w * args.scale), 3)
+            result = np.full(output_shape, (255, 0, 255), dtype=np.uint8)
+            for task_y, part in pieces.items():
+                out_y = round(task_y * args.scale)
+                result[out_y:out_y + part.shape[0]] = part
+            print(f"[PARTIAL IMAGE] {len(failed_tasks)} task region(s) highlighted magenta.")
+        else:
+            result = np.vstack([pieces[y] for y in sorted(pieces)])
     elapsed = time.perf_counter() - started
     path = Path(args.output) / f"{Path(args.input).stem}_{args.scale:.1f}x.png"
     save_image(path, result)
-    print(f"[MASTER] output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
+    status = "PARTIAL" if failed_tasks else "COMPLETE"
+    print(f"[MASTER] status={status} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
     print(f"[METRICS] mode={args.mode} scheduler={args.scheduler} workers={len(workers) if args.mode == 'distributed' else 0} seconds={elapsed:.6f} throughput={h * w / elapsed:.2f} input_pixels/s")
     if baseline_seconds is not None:
         parallelism = len(workers) if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
