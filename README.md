@@ -1,33 +1,98 @@
 # Distributed Image Upscaler
 
-Master–Worker image processing with TCP, automatic UDP worker discovery, OpenCV, NumPy, and Pillow. The Master coordinates and stitches distributed tasks; each Worker uses a persistent process pool.
+Program pemrosesan gambar Master–Worker menggunakan Python, TCP, UDP discovery, NumPy, OpenCV, dan Pillow. Master membagi gambar menjadi strip, menjadwalkan task ke Worker, lalu menyusun hasilnya.
 
-## Setup
+## 1. Siapkan source code
 
-On each machine, install Python dependencies from `requirements.txt`. On NixOS, `nix develop` provides the development environment.
+Salin folder proyek ke komputer Master dan setiap komputer Worker. Semua komputer harus memakai versi source yang sama. Di Worker, `master.py` dan folder `before/` tidak dibutuhkan, tetapi menyalin seluruh folder adalah cara termudah.
 
-Start one Worker on each worker computer (allow UDP 5001 and TCP 5000 through its firewall):
+## 2. Instal dependensi
 
-```sh
+Pasang dependensi di Master dan setiap Worker.
+
+### NixOS
+
+Dari folder proyek, aktifkan environment yang disediakan:
+
+```bash
+nix develop
+```
+
+Jalankan `python worker.py` atau `python master.py` dari shell tersebut.
+
+### Linux lain
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -c "import numpy, cv2, PIL; print('Dependencies ready')"
+```
+
+### Windows PowerShell
+
+```powershell
+py -3.14 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -c "import numpy, cv2, PIL; print('Dependencies ready')"
+```
+
+Jika PowerShell menolak aktivasi environment, jalankan `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, lalu aktifkan kembali `.venv`.
+
+## 3. Siapkan jaringan
+
+Master dan Worker harus terhubung ke LAN yang sama dan mengizinkan broadcast UDP untuk discovery. Izinkan koneksi masuk **TCP 5000** (task/result) dan **UDP 5001** (discovery) pada firewall Worker.
+
+Di NixOS, tambahkan port berikut ke konfigurasi firewall, lalu rebuild sistem:
+
+```nix
+networking.firewall.allowedTCPPorts = [ 5000 ];
+networking.firewall.allowedUDPPorts = [ 5001 ];
+```
+
+Di Windows, jalankan PowerShell sebagai Administrator:
+
+```powershell
+New-NetFirewallRule -DisplayName "Upscayl Worker TCP 5000" -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow -Profile Private
+New-NetFirewallRule -DisplayName "Upscayl Discovery UDP 5001" -Direction Inbound -Protocol UDP -LocalPort 5001 -Action Allow -Profile Private
+```
+
+## 4. Jalankan Worker lalu Master
+
+Di setiap komputer Worker, masuk ke folder proyek, aktifkan environment Python yang sudah disiapkan, lalu jalankan:
+
+```bash
 python worker.py
 ```
 
-Worker otomatis bind ke semua antarmuka jaringan, memakai port default, dan membuat process pool sebesar jumlah CPU core yang terdeteksi. Opsi konfigurasi tetap tersedia bila diperlukan.
+Worker memakai seluruh core CPU yang terdeteksi secara default. Biarkan terminal dan proses Worker tetap aktif.
 
-The Worker announces itself over UDP discovery port 5001. The Master and Workers need LAN broadcast connectivity. If discovery is blocked, pass workers manually with `--worker IP[:PORT]`.
+Setelah Worker aktif, pada komputer Master jalankan `python master.py`. Master akan memindai Worker, menampilkan daftar perangkat, lalu meminta path gambar, faktor skala, mode pemrosesan, pilihan Worker, dan scheduler. Path gambar harus menunjuk ke file yang ada di komputer Master, misalnya `before/anime.png`.
 
-## Interactive Master (recommended)
+Mode pemrosesan:
 
-```sh
-python master.py
-```
+- **Sequential:** satu proses mengolah gambar penuh sebagai baseline.
+- **Local parallel:** Master membagi gambar ke beberapa proses lokal.
+- **Distributed:** Worker terpilih mengolah task secara bersamaan; Master menggabungkan hasil.
 
-The terminal scans for Workers, displays their names, addresses, and process slots, then asks for the input image, scale, execution mode, Worker selection, and scheduler. The modes are sequential baseline, local parallel, and distributed. Distributed mode offers dynamic or static scheduling and optional fault simulation. Results are saved under `after/`; timing, throughput, image checksum, task progress, and recovery messages appear in the terminal.
+Scheduler:
 
-For unattended runs, the same choices remain available as command-line options. `--workers` limits detected nodes for the 1/2/4/6/9 Worker scalability scenarios; `--rows-per-task` controls strip granularity.
+- **Dynamic:** task berikutnya diberikan ke slot Worker yang baru selesai.
+- **Static:** task dibagikan terlebih dahulu ke slot Worker.
 
-For a fault injection run, `--fail-after N` simulates losing the Worker that completed task N by removing it from scheduling. A task whose connection fails is retried on another available Worker. For a real failure demonstration, stop a Worker process during a run and observe retry behavior.
+Output gambar disimpan di `after/`. Waktu, throughput, checksum, dan status task ditampilkan di terminal.
 
-## UAS evaluation
+## 5. Arti simulasi kehilangan Worker
 
-Run sequential, local-parallel, distributed, static-versus-dynamic, fault-recovery, and 1/2/4/6/9 Worker scenarios on the same square input sizes. Repeat each run and retain terminal logs and Worker-side evidence. The required 1 Master + 9 Worker physical-node demonstration must be recorded on physical computers; local simulations do not establish that requirement.
+Pilihan **Simulate scheduler removing a Worker** hanya menguji perubahan scheduler. Contoh: jika diisi `3`, setelah tiga task selesai Master berhenti memberikan task baru ke Worker yang menyelesaikan task ketiga. Proses Worker tersebut **tidak dimatikan** dan koneksinya **tidak diputus**. Karena itu, pilihan ini bukan bukti fault detection atau recovery dari Worker yang benar-benar gagal.
+
+Untuk uji kegagalan nyata, mulai distributed job dengan cukup banyak task, lalu hentikan proses `worker.py` pada salah satu komputer saat job berlangsung. Master semestinya mendeteksi task yang gagal/timeout dan mencoba mengirim ulang task ke Worker lain. Catat log Master dan Worker sebagai bukti.
+
+## 6. Skenario evaluasi UAS
+
+Gunakan input gambar persegi yang sama untuk membandingkan sequential, local parallel, static, dan dynamic. Ulangi distributed processing dengan 1, 2, 4, 6, dan 9 Worker. Simpan bukti terminal Master dan Worker. Persyaratan demo 1 Master + 9 Worker harus dibuktikan dengan komputer fisik; simulasi lokal tidak menggantikannya.
+
+Jika Worker tidak terdeteksi, pastikan process `worker.py` aktif, firewall mengizinkan TCP 5000 dan UDP 5001, serta perangkat berada pada LAN/broadcast domain yang sama. Jika broadcast jaringan diblokir, gunakan opsi alamat Worker manual pada command-line.

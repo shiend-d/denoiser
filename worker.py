@@ -40,6 +40,7 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
             send_bytes(conn, output)
             print(f"[WORKER] task={request['task_id']} master={address[0]} input={len(payload)}B output={len(output)}B checksum={digest}", flush=True)
         except Exception as exc:
+            print(f"[WORKER][ERROR] master={address[0]} error={type(exc).__name__}: {exc}", flush=True)
             try:
                 send_json(conn, {"ok": False, "error": str(exc)})
             except OSError:

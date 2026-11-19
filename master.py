@@ -95,7 +95,7 @@ def main() -> None:
         while args.scale is None:
             try: args.scale = scale_arg(input("Upscale factor (1.0-10.0): ").strip())
             except (ValueError, argparse.ArgumentTypeError) as exc: print(f"Invalid scale: {exc}")
-        print("\nChoose execution mode:\n  1) Sequential baseline\n  2) Local parallel (this computer)\n  3) Distributed (Workers)")
+        print("\nChoose execution mode:\n  1) Sequential baseline: one process on Master\n  2) Local parallel: multiple processes on Master\n  3) Distributed: selected Workers process strips concurrently")
         modes = {"1": "sequential", "2": "local-parallel", "3": "distributed"}
         while args.mode not in modes.values(): args.mode = modes.get(input("Mode [1-3]: ").strip())
         if args.mode == "distributed":
@@ -114,9 +114,9 @@ def main() -> None:
                     try: found = [found[int(item)-1] for item in selection.split(",") if 0 < int(item) <= len(found)]
                     except ValueError: print("Invalid selection; using all discovered Workers.")
             args.worker = [f"{w['ip']}:{w['port']}" for w in found]
-            print("Scheduler:\n  1) Dynamic (recommended)\n  2) Static")
+            print("Scheduler:\n  1) Dynamic: give a free Worker slot another task immediately\n  2) Static: assign all strips to Worker slots before processing")
             args.scheduler = "static" if input("Scheduler [1-2, default 1]: ").strip() == "2" else "dynamic"
-            if args.scheduler == "dynamic" and len(found) > 1 and input("Simulate Worker loss? [y/N]: ").strip().lower() == "y":
+            if args.scheduler == "dynamic" and len(found) > 1 and input("Simulate scheduler removing a Worker after a completed task? (not a real network failure) [y/N]: ").strip().lower() == "y":
                 try: args.fail_after = max(1, int(input("Lose a Worker after how many tasks complete? ").strip()))
                 except ValueError: args.fail_after = 1
         print()
