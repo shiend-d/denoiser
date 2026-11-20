@@ -45,26 +45,17 @@ def interval_union_seconds(intervals: list[tuple[float, float]]) -> float:
     return total + end - start
 
 
-def subtract_intervals(intervals: list[tuple[float, float]], occupied: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Return portions of intervals not already covered by occupied intervals."""
-    merged_occupied = []
-    for start, end in sorted(occupied):
-        if end <= start: continue
-        if merged_occupied and start <= merged_occupied[-1][1]:
-            merged_occupied[-1] = (merged_occupied[-1][0], max(merged_occupied[-1][1], end))
-        else:
-            merged_occupied.append((start, end))
-    remaining = []
-    for start, end in intervals:
-        cursor = start
-        for block_start, block_end in merged_occupied:
-            if block_end <= cursor: continue
-            if block_start >= end: break
-            if block_start > cursor: remaining.append((cursor, min(block_start, end)))
-            cursor = max(cursor, block_end)
-            if cursor >= end: break
-        if cursor < end: remaining.append((cursor, end))
-    return remaining
+def clip_intervals(
+    intervals: list[tuple[float, float]],
+    windows: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Keep each measured interval only where it falls inside active windows."""
+    return [
+        (max(start, window_start), min(end, window_end))
+        for start, end in intervals
+        for window_start, window_end in windows
+        if min(end, window_end) > max(start, window_start)
+    ]
 
 
 def worker_info(host: str, port: int) -> dict:
@@ -137,15 +128,17 @@ def discover_workers(timeout: float = 1.5) -> list[dict]:
     return list(found.values())
 
 
-def remote_task(worker: dict, task: dict, scale: float) -> tuple[dict, np.ndarray]:
+def remote_task(worker: dict, task: dict, scale: float, timeout: float = SOCKET_TIMEOUT) -> tuple[dict, np.ndarray]:
     image = task["image"]
     task_started = time.perf_counter()
     connect_started = time.perf_counter()
     connect_seconds = upload_seconds = 0.0
     payload = np.ascontiguousarray(image).tobytes()
-    with socket.create_connection((worker["ip"], worker["port"]), timeout=SOCKET_TIMEOUT) as sock:
+    # Fail quickly when a retry target is offline, while allowing large task
+    # payloads/results enough time to cross a congested LAN link.
+    with socket.create_connection((worker["ip"], worker["port"]), timeout=min(timeout, 10.0)) as sock:
         connect_seconds = time.perf_counter() - connect_started
-        sock.settimeout(SOCKET_TIMEOUT)
+        sock.settimeout(timeout)
         send_json(sock, {"version": PROTOCOL_VERSION, "task_id": task["id"], "shape": list(image.shape), "scale": scale, "checksum": checksum(image)})
         acknowledgement = recv_json(sock)
         if acknowledgement.get("busy"):
@@ -245,7 +238,7 @@ def main() -> None:
             print("Scheduler:\n  1) Dynamic: give a free Worker slot another task immediately\n  2) Static: assign all strips to Worker slots before processing")
             args.scheduler = "static" if input("Scheduler [1-2, default 1]: ").strip() == "2" else "dynamic"
             args.fault_tolerance = input("Enable fault tolerance? [y/N]: ").strip().lower() in ("y", "yes")
-            print("[FAULT TOLERANCE] Enabled: failed tasks retry on another Worker. Disabled: a failed task stops the job; no partial output is saved.")
+            print("[FAULT TOLERANCE] Y: failed tasks retry on another Worker, with waits for busy slots. N: no retry; processing continues and missing regions are saved in magenta.")
         print()
     args.mode = args.mode or "distributed"
     # Discovery is setup and must not be included in T_run.
@@ -264,6 +257,7 @@ def main() -> None:
         if not workers:
             parser.error("no Workers discovered; start worker.py before launching Master")
         planned_worker_count = len(workers)
+        all_workers = list(workers)
         print("[MASTER] Selected Workers: " + ", ".join(f"{w['host']}@{w['ip']}" for w in workers))
     image = read_image(args.input)
     h, w, _ = image.shape
@@ -346,36 +340,57 @@ def main() -> None:
                         worker, task = active.pop(future)
                         retried = False
                         lost = False
+                        first_error = None
                         try:
                             response, part = future.result()
                         except WorkerBusyError as busy_error:
-                            line = f"[REJECTED] task={task['id']} worker={worker['host']}@{worker['ip']} reason=busy; job aborted without waiting or rerouting"
-                            print(line); failure_events.append(line)
-                            raise RuntimeError(line) from busy_error
-                        except Exception as first_error:
+                            first_error = busy_error
                             failed_worker = worker
-                            failure_line = f"[TASK FAILED] task={task['id']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}"
+                        except Exception as error:
+                            first_error = error
+                            failed_worker = worker
+                        if first_error is not None:
+                            event = "WORKER BUSY" if isinstance(first_error, WorkerBusyError) else "TASK FAILED"
+                            failure_line = f"[{event}] task={task['id']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}"
                             print(failure_line); failure_events.append(failure_line)
-                            workers = [w for w in workers if w["ip"] != failed_worker["ip"]]
-                            slots = [w for w in slots if w["ip"] != failed_worker["ip"]]
                             if not args.fault_tolerance:
+                                workers = [w for w in workers if w["ip"] != failed_worker["ip"]]
+                                slots = [w for w in slots if w["ip"] != failed_worker["ip"]]
                                 failed_tasks.append(task); lost = True
                                 print(f"[PARTIAL] task={task['id']} marked missing; its output region will be highlighted")
                             else:
                                 recovery_started = time.perf_counter()
                                 recovered = False
-                                for candidate in workers:
-                                    if candidate["ip"] == failed_worker["ip"]: continue
-                                    retry_line = f"[RETRY] task={task['id']} rerouted {failed_worker['host']} -> {candidate['host']}@{candidate['ip']}"
-                                    print(retry_line); failure_events.append(retry_line)
-                                    try:
-                                        response, part = remote_task(candidate, task, args.scale); worker = candidate; recovered = True; retried = True; break
-                                    except Exception as retry_error:
-                                        retry_error_line = f"[RETRY FAILED] task={task['id']} worker={candidate['host']} reason={type(retry_error).__name__}: {retry_error}"
-                                        print(retry_error_line); failure_events.append(retry_error_line)
+                                # Keep temporarily unavailable Workers eligible. A busy response
+                                # means capacity is occupied, not that the Worker has failed.
+                                retry_candidates = [w for w in all_workers if w["ip"] != failed_worker["ip"]]
+                                retry_candidates += [w for w in all_workers if w["ip"] == failed_worker["ip"]]
+                                for retry_round in range(1, 5):
+                                    saw_busy = False
+                                    for candidate in retry_candidates:
+                                        retry_line = f"[RETRY] task={task['id']} attempt={retry_round} target={candidate['host']}@{candidate['ip']}"
+                                        print(retry_line); failure_events.append(retry_line)
+                                        try:
+                                            response, part = remote_task(candidate, task, args.scale)
+                                            worker = candidate; recovered = True; retried = True
+                                            break
+                                        except WorkerBusyError as retry_error:
+                                            saw_busy = True
+                                            busy_line = f"[RETRY WAIT] task={task['id']} worker={candidate['host']} is busy; will try again"
+                                            print(busy_line); failure_events.append(busy_line)
+                                        except Exception as retry_error:
+                                            retry_error_line = f"[RETRY FAILED] task={task['id']} worker={candidate['host']} reason={type(retry_error).__name__}: {retry_error}"
+                                            print(retry_error_line); failure_events.append(retry_error_line)
+                                    if recovered:
+                                        break
+                                    if retry_round < 4:
+                                        delay = min(2 ** (retry_round - 1), 8)
+                                        wait_line = f"[RETRY BACKOFF] task={task['id']} round={retry_round} wait={delay}s" + (" (Workers busy)" if saw_busy else "")
+                                        print(wait_line); failure_events.append(wait_line)
+                                        time.sleep(delay)
                                 if not recovered:
                                     failed_tasks.append(task); lost = True
-                                    print(f"[PARTIAL] task={task['id']} has no available retry destination; output region will be highlighted")
+                                    print(f"[PARTIAL] task={task['id']} retry limit reached; output region will be highlighted")
                                 else:
                                     task_recovery = time.perf_counter() - recovery_started
                                     recovery_seconds += task_recovery
@@ -403,15 +418,21 @@ def main() -> None:
                             stats["bytes"] += int(task["image"].nbytes)
                             stats["retries"] += int(retried)
                             detail = {"id": task["id"], "worker": worker["host"], "rows": f"{task['y']}..{task['end']-1}", "bytes_in": transport.get("sent_bytes", task["image"].nbytes), "bytes_out": transport.get("received_bytes", 0), "connect": transport.get("connect", 0), "upload": transport.get("upload", 0), "busy_wait": transport.get("busy_wait", 0), "worker_wait": transport.get("worker_wait", 0), "compute": response.get("compute_seconds", 0), "download": transport.get("download", 0), "total": transport.get("total", 0), "retried": retried}
-                            detail["other"] = max(0.0, detail["total"] - detail["upload"] - detail["compute"] - detail["download"])
+                            detail["network"] = detail["upload"] + detail["download"]
+                            detail["other"] = max(0.0, detail["total"] - detail["network"] - detail["compute"])
                             task_details.append(detail)
-                            print(f"[TASK] {task['id'][:8]} -> {worker['host']} rows={detail['rows']} connect={detail['connect']:.3f}s upload={detail['upload']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s download={detail['download']:.3f}s in={detail['bytes_in']/1e6:.2f}MB out={detail['bytes_out']/1e6:.2f}MB")
+                            print(f"[TASK] {task['id'][:8]} -> {worker['host']} rows={detail['rows']} connect={detail['connect']:.3f}s network={detail['network']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s task_data={detail['bytes_in']/1e6:.2f}MB result_data={detail['bytes_out']/1e6:.2f}MB")
                             top = round((task["y"] - task["lo"]) * args.scale); bottom = round((task["end"] - task["lo"]) * args.scale)
                             pieces[task["y"]] = part[top:bottom]
                             completed += 1
                         if args.scheduler == "dynamic" and pending_tasks and slots:
                             submit(worker if worker in slots else slots[0], pending_tasks.pop(0))
-                if pending_tasks: raise RuntimeError("no active Worker slots for pending tasks")
+                if pending_tasks:
+                    if args.fault_tolerance:
+                        raise RuntimeError("no active Worker slots for pending tasks")
+                    failed_tasks.extend(pending_tasks)
+                    print(f"[PARTIAL] {len(pending_tasks)} pending task(s) have no available Worker and will be highlighted")
+                    pending_tasks.clear()
         parallel_wall_seconds = time.perf_counter() - parallel_started
         stitching_started = time.perf_counter()
         if failed_tasks:
@@ -442,49 +463,55 @@ def main() -> None:
         line = f"{label:<24} {value}"
         print(line); report.append(line)
     if args.mode != "sequential":
-        all_upload_intervals = [interval for stat in worker_stats.values() for interval in stat["master_upload_intervals"]]
+        all_network_intervals = [interval for stat in worker_stats.values() for interval in (stat["master_upload_intervals"] + stat["master_download_intervals"])]
         all_compute_intervals = [interval for stat in worker_stats.values() for interval in stat["master_compute_intervals"]]
-        all_download_intervals = [interval for stat in worker_stats.values() for interval in stat["master_download_intervals"]]
-        all_upload = interval_union_seconds(all_upload_intervals)
-        all_compute = interval_union_seconds(subtract_intervals(all_compute_intervals, all_upload_intervals))
-        all_download = interval_union_seconds(subtract_intervals(all_download_intervals, all_upload_intervals + all_compute_intervals))
-        run_other = max(0.0, elapsed - task_preparation_seconds - stitching_seconds - all_upload - all_compute - all_download)
+        run_window = [(parallel_started, parallel_started + parallel_wall_seconds)]
+        run_network = clip_intervals(all_network_intervals, run_window)
+        run_compute = clip_intervals(all_compute_intervals, run_window)
+        all_network = interval_union_seconds(run_network)
+        all_compute = interval_union_seconds(run_compute)
+        # Other is the balancing remainder: it includes setup/stitching and
+        # subtracts network/compute overlap so the phase rows add to T_run.
+        run_other = elapsed - all_network - all_compute
         phase_rows = [
-            ("Task preparation", task_preparation_seconds),
-            ("Upload (all Workers)", all_upload),
+            ("Network (all Workers)", all_network),
             ("Pure compute (all Workers)", all_compute),
-            ("Download (all Workers)", all_download),
             ("Other", run_other),
-            ("Stitching", stitching_seconds),
             ("T_run total", elapsed),
         ]
-        print("\n[T_RUN DETAIL]")
+        print("\n[T_RUN PHASE WALL TIMES - OTHER INCLUDES OVERLAP ADJUSTMENT]")
         phase_header = f"{'PHASE':<30} {'WALL TIME':>12}"
         print(phase_header)
-        report.extend(["", "T_RUN DETAIL", phase_header])
+        report.extend(["", "T_RUN PHASE WALL TIMES - OTHER INCLUDES OVERLAP ADJUSTMENT", phase_header])
         for phase, seconds in phase_rows:
             line = f"{phase:<30} {seconds:>11.3f}s"
             print(line); report.append(line)
     if worker_stats:
-        header = f"{'WORKER':<22} {'TASKS':>5} {'UPLOAD':>9} {'COMPUTE':>9} {'DOWNLOAD':>10} {'OTHER':>9} {'ACTIVE':>9} {'AVG CPU':>9} {'AVG RAM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
-        print("\n[WORKER ANALYSIS]")
+        header = f"{'WORKER':<22} {'TASKS':>5} {'NETWORK':>10} {'COMPUTE':>9} {'OTHER':>9} {'ACTIVE':>9} {'AVG CPU':>9} {'AVG RAM':>9} {'TASK MB':>9} {'RESULT MB':>10} {'RETRY':>6}"
+        print("\n[WORKER PHASE WALL TIMES - PER WORKER; MAY OVERLAP]")
         print(header)
         report.extend(["", "WORKER PERFORMANCE", header])
         for stat in worker_stats.values():
             avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
             avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
-            upload_wall = interval_union_seconds(stat["master_upload_intervals"])
-            compute_wall = interval_union_seconds(subtract_intervals(stat["master_compute_intervals"], stat["master_upload_intervals"]))
-            download_wall = interval_union_seconds(subtract_intervals(stat["master_download_intervals"], stat["master_upload_intervals"] + stat["master_compute_intervals"]))
             worker_wall = interval_union_seconds(stat["master_active_intervals"])
-            worker_other = max(0.0, worker_wall - upload_wall - compute_wall - download_wall)
-            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {upload_wall:>8.3f}s {compute_wall:>8.3f}s {download_wall:>9.3f}s {worker_other:>8.3f}s {worker_wall:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
+            active = stat["master_active_intervals"]
+            worker_network = clip_intervals(stat["master_upload_intervals"] + stat["master_download_intervals"], active)
+            worker_compute = clip_intervals(stat["master_compute_intervals"], active)
+            network_wall = interval_union_seconds(worker_network)
+            compute_wall = interval_union_seconds(worker_compute)
+            covered_worker = interval_union_seconds(worker_network + worker_compute)
+            worker_other = max(0.0, worker_wall - covered_worker)
+            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {network_wall:>9.3f}s {compute_wall:>8.3f}s {worker_other:>8.3f}s {worker_wall:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>9.2f} {stat['retries']:>6}"
             print(row); report.append(row)
-    task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'UPLOAD':>9} {'COMPUTE':>9} {'DOWNLOAD':>9} {'OTHER':>9} {'TOTAL TIME':>11}"
+    task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'TASK MB':>8} {'RESULT MB':>10} {'NETWORK':>10} {'NETWORK MB/S':>13} {'COMPUTE':>9} {'OTHER':>9} {'TOTAL TIME':>11}"
     print("\n[TASK TIMINGS]"); print(task_header)
     report.extend(["", "TASK TIMINGS", task_header])
     for item in task_details:
-        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {item['upload']:>8.3f}s {item['compute']:>8.3f}s {item['download']:>8.3f}s {item['other']:>8.3f}s {item['total']:>10.3f}s"
+        input_mb = item["bytes_in"] / 1e6
+        result_mb = item["bytes_out"] / 1e6
+        network_rate = (input_mb + result_mb) / item["network"] if item["network"] else 0.0
+        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {input_mb:>7.2f} {result_mb:>9.2f} {item['network']:>9.3f}s {network_rate:>12.2f} {item['compute']:>8.3f}s {item['other']:>8.3f}s {item['total']:>10.3f}s"
         print(row); report.append(row)
     recovery_line = f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s"
     print("\n" + recovery_line); report.append(recovery_line)

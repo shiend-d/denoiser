@@ -1,0 +1,73 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 2.5x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_2.5x.png
+Execution time: 73.230590s
+Throughput: 57275.300 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             2
+T_seq                    0.735s
+T_run                    73.231s
+Speedup                  0.010x
+Efficiency               0.50% (P=2)
+Throughput               57275.30 input-pixels/s
+
+T_RUN PHASE WALL TIMES - PHASES MAY OVERLAP; DO NOT SUM
+PHASE                             WALL TIME
+Task preparation                     0.000s
+Workers receive tasks (all)         50.509s
+Pure compute (all Workers)           1.861s
+Workers send results (all)          67.807s
+Other                                0.064s
+Stitching                            0.012s
+T_run total                         73.231s
+
+WORKER PERFORMANCE
+WORKER                 TASKS  RECV TASK   COMPUTE  SEND RESULT     OTHER    ACTIVE   AVG CPU   AVG RAM   TASK MB  RESULT MB  RETRY
+DESKTOP-F40ABI3           23    26.971s    1.116s      64.484s    0.000s   71.310s     10.2%     32.1%    13.37     83.56      0
+localhost                  9    35.506s    0.745s      67.807s    0.000s   73.155s      9.9%     74.7%     5.31     33.18      0
+
+TASK TIMINGS
+TASK       WORKER                 ROWS             TASK MB  RECV TASK  TASK MB/S   COMPUTE  RESULT MB  SEND RESULT  RESULT MB/S     OTHER  TOTAL TIME
+6bcf8d58   DESKTOP-F40ABI3        0..63              0.49    8.615s      0.06    0.047s      3.07     20.342s        0.15    0.685s     29.690s
+eaf91254   DESKTOP-F40ABI3        384..447           0.59    8.023s      0.07    0.067s      3.69     21.969s        0.17    0.591s     30.650s
+1dff414e   DESKTOP-F40ABI3        1088..1151         0.59    6.796s      0.09    0.155s      3.69     27.651s        0.13    0.531s     35.133s
+307f0438   DESKTOP-F40ABI3        512..575           0.59    8.170s      0.07    0.066s      3.69     28.541s        0.13    0.540s     37.317s
+f9f20d2d   DESKTOP-F40ABI3        128..191           0.59    6.938s      0.09    0.071s      3.69     30.298s        0.12    0.599s     37.905s
+d4f2e499   DESKTOP-F40ABI3        768..831           0.59    9.281s      0.06    0.061s      3.69     30.987s        0.12    0.558s     40.887s
+168a8038   DESKTOP-F40ABI3        1024..1087         0.59    6.935s      0.09    0.151s      3.69     33.649s        0.11    0.528s     41.262s
+e5c2705a   DESKTOP-F40ABI3        1216..1279         0.59    9.576s      0.06    0.054s      3.69     31.177s        0.12    0.643s     41.450s
+21771035   DESKTOP-F40ABI3        640..703           0.59   10.156s      0.06    0.085s      3.69     35.727s        0.10    0.607s     46.575s
+fa1ab7a7   DESKTOP-F40ABI3        896..959           0.59    7.594s      0.08    0.070s      3.69     42.531s        0.09    0.593s     50.788s
+db5186f9   localhost              960..1023          0.59    9.956s      0.06    0.124s      3.69     42.030s        0.09    0.318s     52.428s
+515347bf   DESKTOP-F40ABI3        1152..1215         0.59    8.394s      0.07    0.058s      3.69     47.210s        0.08    1.025s     56.688s
+6fb2e759   DESKTOP-F40ABI3        256..319           0.59    9.124s      0.06    0.070s      3.69     48.101s        0.08    1.045s     58.340s
+8c4b6e0b   DESKTOP-F40ABI3        1408..1471         0.59    5.755s      0.10    0.060s      3.69     22.532s        0.16    0.874s     29.221s
+0b4b1396   DESKTOP-F40ABI3        1344..1407         0.59    1.570s      0.38    0.082s      3.69     31.390s        0.12    0.766s     33.808s
+d26175e9   DESKTOP-F40ABI3        1792..1855         0.59    2.266s      0.26    0.069s      3.69     16.184s        0.23    0.586s     19.105s
+388ed5b7   DESKTOP-F40ABI3        1984..2047         0.49    1.811s      0.27    0.064s      3.07      8.059s        0.38    0.835s     10.769s
+b9fcaa2d   localhost              64..127            0.59    4.958s      0.12    0.179s      3.69     62.124s        0.06    0.273s     67.534s
+08ffe3d5   DESKTOP-F40ABI3        1600..1663         0.59    2.225s      0.27    0.088s      3.69     23.775s        0.16    0.717s     26.805s
+8d093aa8   DESKTOP-F40ABI3        1280..1343         0.59    1.377s      0.43    0.074s      3.69     35.348s        0.10    1.425s     38.225s
+1406653d   DESKTOP-F40ABI3        1472..1535         0.59    3.211s      0.18    0.084s      3.69     27.379s        0.13    0.653s     31.326s
+c7defa85   localhost              320..383           0.59   18.966s      0.03    0.062s      3.69     49.972s        0.07    0.367s     69.367s
+ccc9b43e   localhost              448..511           0.59   21.104s      0.03    0.120s      3.69     48.332s        0.08    0.324s     69.879s
+c942a90a   localhost              704..767           0.59   14.114s      0.04    0.066s      3.69     55.503s        0.07    0.374s     70.057s
+29134f64   DESKTOP-F40ABI3        1664..1727         0.59    2.619s      0.23    0.096s      3.69     25.427s        0.14    0.782s     28.925s
+2668eddc   localhost              192..255           0.59   12.630s      0.05    0.071s      3.69     57.478s        0.06    0.392s     70.571s
+0bb15ea7   localhost              576..639           0.59   15.783s      0.04    0.062s      3.69     54.586s        0.07    0.387s     70.817s
+db3fa65b   DESKTOP-F40ABI3        1536..1599         0.59    2.813s      0.21    0.064s      3.69     30.242s        0.12    0.751s     33.869s
+7f1de979   DESKTOP-F40ABI3        1728..1791         0.59    2.467s      0.24    0.081s      3.69     27.022s        0.14    0.792s     30.361s
+b7dc6037   DESKTOP-F40ABI3        1856..1919         0.59    1.663s      0.35    0.075s      3.69     18.562s        0.20    0.758s     21.059s
+49e9a8e3   localhost              832..895           0.59   18.179s      0.03    0.061s      3.69     53.607s        0.07    0.414s     72.261s
+621786d1   localhost              1920..1983         0.59   14.392s      0.04    0.084s      3.69      5.170s        0.71    1.141s     20.787s
+[RECOVERY] retries=0 recovery_time=0.000s
