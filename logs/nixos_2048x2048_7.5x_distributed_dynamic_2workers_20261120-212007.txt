@@ -1,0 +1,336 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 7.5x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_7.5x.png
+Execution time: 580.265358s
+Throughput: 7228.252 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             2
+T_seq                    12.312s
+T_run                    580.265s
+Speedup                  0.021x
+Efficiency               1.06% (P=2)
+Throughput               7228.25 input-pixels/s
+
+T_RUN PHASE WALL TIMES - NETWORK EXCLUDES COMPUTE OVERLAP
+PHASE                             WALL TIME
+Network (all Workers)              562.761s
+Pure compute (all Workers)          15.502s
+Other (whole job)                    2.002s
+T_run total                        580.265s
+
+WORKER PERFORMANCE
+WORKER                 TASKS FAILED    NETWORK   COMPUTE OTHER (WORKER)    ACTIVE   AVG CPU   AVG RAM   TASK MB  RESULT MB  RETRY
+localhost                 84     11   481.691s    7.812s         9.533s  499.036s     22.4%     71.0%     6.27    352.60     10
+DESKTOP-F40ABI3          172      9   524.667s    8.346s         8.497s  541.509s     25.2%     40.5%    12.90    725.85     10
+
+TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP
+TASK       WORKER                 REGION                      STATUS                          TASK MB  RESULT MB    NETWORK  NETWORK MB/S   COMPUTE OTHER (TASK)  TOTAL TIME
+b4a9a445   localhost              x=640..767,y=0..127         SUCCESS                           0.07      3.89    29.853s          0.13    0.708s       4.862s     35.423s
+781c528b   DESKTOP-F40ABI3        x=1792..1919,y=0..127       SUCCESS                           0.07      3.89    31.194s          0.13    0.276s       7.074s     38.543s
+ec2365b3   localhost              x=896..1023,y=0..127        SUCCESS                           0.07      3.89    27.840s          0.14    0.745s      10.772s     39.356s
+5b978957   localhost              x=768..895,y=128..255       SUCCESS                           0.08      4.32    24.188s          0.18    0.117s       0.745s     25.050s
+9e04bdd0   DESKTOP-F40ABI3        x=256..383,y=0..127         SUCCESS                           0.07      3.89    58.564s          0.07    0.373s       7.217s     66.154s
+e06eda96   DESKTOP-F40ABI3        x=768..895,y=0..127         SUCCESS                           0.07      3.89    61.660s          0.06    0.239s       5.021s     66.920s
+6a336b1a   localhost              x=1920..2047,y=0..127       SUCCESS                           0.06      3.50    53.565s          0.07    0.964s      12.545s     67.073s
+a1fdce61   DESKTOP-F40ABI3        x=128..255,y=128..255       SUCCESS                           0.08      4.32    61.894s          0.07    0.187s       5.180s     67.260s
+4ebb2016   DESKTOP-F40ABI3        x=384..511,y=128..255       SUCCESS                           0.08      4.32    62.330s          0.07    0.239s       4.945s     67.514s
+1b9f2c0e   DESKTOP-F40ABI3        x=640..767,y=128..255       SUCCESS                           0.08      4.32    28.524s          0.15    0.151s       1.952s     30.627s
+67d8bde2   DESKTOP-F40ABI3        x=1152..1279,y=128..255     SUCCESS                           0.08      4.32     6.589s          0.67    0.075s       0.996s      7.660s
+ff0c0cb0   DESKTOP-F40ABI3        x=1536..1663,y=128..255     SUCCESS                           0.08      4.32     8.886s          0.49    0.065s       1.121s     10.072s
+d58beb81   DESKTOP-F40ABI3        x=512..639,y=0..127         SUCCESS                           0.07      3.89    72.707s          0.05    0.299s       5.068s     78.075s
+18672abe   DESKTOP-F40ABI3        x=256..383,y=128..255       SUCCESS                           0.08      4.32    68.963s          0.06    0.155s       9.571s     78.688s
+8b3f5ad0   DESKTOP-F40ABI3        x=1408..1535,y=128..255     SUCCESS                           0.08      4.32    12.263s          0.36    0.064s       2.376s     14.704s
+5d412b5d   DESKTOP-F40ABI3        x=0..127,y=256..383         SUCCESS                           0.07      3.89     4.556s          0.87    0.044s       0.615s      5.215s
+1cb52e57   DESKTOP-F40ABI3        x=1920..2047,y=128..255     SUCCESS                           0.07      3.89     4.841s          0.82    0.063s       1.446s      6.350s
+8e3f1436   DESKTOP-F40ABI3        x=1664..1791,y=128..255     SUCCESS                           0.08      4.32     8.302s          0.53    0.062s       6.430s     14.793s
+ef31ec62   DESKTOP-F40ABI3        x=1024..1151,y=0..127       SUCCESS                           0.07      3.89    79.359s          0.05    0.285s       5.587s     85.231s
+ee0716f7   DESKTOP-F40ABI3        x=384..511,y=256..383       SUCCESS                           0.08      4.32     4.223s          1.04    0.146s       0.391s      4.760s
+e05c8b5c   DESKTOP-F40ABI3        x=1536..1663,y=0..127       SUCCESS                           0.07      3.89    80.955s          0.05    0.264s       8.493s     89.711s
+456019cc   localhost              x=512..639,y=128..255       SUCCESS                           0.08      4.32    49.073s          0.09    0.143s       5.178s     54.394s
+74907c4f   localhost              x=1280..1407,y=128..255     SUCCESS                           0.08      4.32    15.095s          0.29    0.076s      10.798s     25.969s
+e6962cec   DESKTOP-F40ABI3        x=1792..1919,y=128..255     SUCCESS                           0.08      4.32    12.318s          0.36    0.000s       8.009s     20.327s
+12bcb7be   DESKTOP-F40ABI3        x=640..767,y=256..383       SUCCESS                           0.08      4.32    12.444s          0.35    0.005s       1.679s     14.128s
+7c96bf9d   DESKTOP-F40ABI3        x=512..639,y=256..383       SUCCESS                           0.08      4.32    12.755s          0.34    0.000s       1.401s     14.156s
+a73071ee   DESKTOP-F40ABI3        x=768..895,y=256..383       SUCCESS                           0.08      4.32    45.545s          0.10    0.000s       6.749s     52.294s
+9788f70c   localhost              x=128..255,y=0..127         RETRIED ON localhost              0.07      3.89     5.715s          0.69    0.087s      12.461s     18.263s
+38107ec2   localhost              x=896..1023,y=128..255      REROUTED TO DESKTOP-F40ABI3       0.08      4.32     6.080s          0.72    0.064s       1.116s      7.260s
+04d61dba   DESKTOP-F40ABI3        x=1024..1151,y=256..383     SUCCESS                           0.08      4.32    15.905s          0.28    0.064s      40.692s     56.661s
+a75fdeb8   localhost              x=384..511,y=0..127         REROUTED TO DESKTOP-F40ABI3       0.07      3.89     2.990s          1.32    0.044s       1.235s      4.269s
+2866266e   localhost              x=1408..1535,y=0..127       REROUTED TO DESKTOP-F40ABI3       0.07      3.89     4.873s          0.81    0.056s       1.880s      6.809s
+b58989cd   DESKTOP-F40ABI3        x=256..383,y=256..383       SUCCESS                           0.08      4.32    50.445s          0.09    0.068s      11.623s     62.136s
+378e227a   localhost              x=1664..1791,y=0..127       REROUTED TO DESKTOP-F40ABI3       0.07      3.89     3.873s          1.02    0.032s       1.636s      5.540s
+90967d28   DESKTOP-F40ABI3        x=1536..1663,y=256..383     SUCCESS                           0.08      4.32    56.666s          0.08    0.095s       0.898s     57.658s
+10ed2860   DESKTOP-F40ABI3        x=0..127,y=0..127           REROUTED TO localhost             0.06      3.50     3.890s          0.92    0.184s       0.703s      4.777s
+1c7e7ea6   localhost              x=1152..1279,y=0..127       REROUTED TO DESKTOP-F40ABI3       0.07      3.89     5.818s          0.68    0.056s       3.021s      8.895s
+d1bf2f61   DESKTOP-F40ABI3        x=1792..1919,y=256..383     SUCCESS                           0.08      4.32     2.909s          1.51    0.064s       1.047s      4.020s
+7e828e64   DESKTOP-F40ABI3        x=128..255,y=256..383       SUCCESS                           0.08      4.32    64.257s          0.07    0.000s       3.905s     68.163s
+88c676e5   DESKTOP-F40ABI3        x=896..1023,y=256..383      SUCCESS                           0.08      4.32    78.317s          0.06    0.054s       0.940s     79.311s
+647da76b   localhost              x=1920..2047,y=256..383     SUCCESS                           0.07      3.89    12.939s          0.31    0.061s       0.989s     13.989s
+f981e27d   DESKTOP-F40ABI3        x=1024..1151,y=128..255     REROUTED TO localhost             0.08      4.32    15.866s          0.28    0.092s       0.552s     16.510s
+5d6fd900   DESKTOP-F40ABI3        x=768..895,y=384..511       SUCCESS                           0.08      4.32     6.934s          0.63    0.091s       1.035s      8.060s
+b8f22260   DESKTOP-F40ABI3        x=256..383,y=384..511       SUCCESS                           0.08      4.32     6.993s          0.63    0.053s       0.890s      7.936s
+4ddddaf8   DESKTOP-F40ABI3        x=1664..1791,y=256..383     SUCCESS                           0.08      4.32    64.099s          0.07    0.096s       1.027s     65.221s
+f6770b61   DESKTOP-F40ABI3        x=0..127,y=384..511         SUCCESS                           0.07      3.89     5.300s          0.75    0.070s       0.838s      6.208s
+9d5ded8c   DESKTOP-F40ABI3        x=128..255,y=384..511       SUCCESS                           0.08      4.32    10.316s          0.43    0.066s       1.470s     11.851s
+515a7f48   DESKTOP-F40ABI3        x=640..767,y=384..511       SUCCESS                           0.08      4.32     5.667s          0.78    0.092s       0.924s      6.683s
+d54fb9bd   DESKTOP-F40ABI3        x=384..511,y=384..511       SUCCESS                           0.08      4.32     8.588s          0.51    0.041s       1.786s     10.415s
+0703b4e4   DESKTOP-F40ABI3        x=512..639,y=384..511       SUCCESS                           0.08      4.32     4.891s          0.90    0.036s       2.213s      7.140s
+01a54c71   localhost              x=896..1023,y=384..511      SUCCESS                           0.08      4.32     2.850s          1.54    0.066s       2.308s      5.224s
+393a8b0e   DESKTOP-F40ABI3        x=0..127,y=128..255         REROUTED TO localhost             0.07      3.89    36.804s          0.11    0.036s       0.624s     37.465s
+ee773dd9   DESKTOP-F40ABI3        x=1408..1535,y=384..511     SUCCESS                           0.08      4.32    13.170s          0.33    0.151s       0.634s     13.955s
+6810c77c   DESKTOP-F40ABI3        x=128..255,y=512..639       SUCCESS                           0.08      4.32    15.148s          0.29    0.177s       1.484s     16.809s
+1887016c   DESKTOP-F40ABI3        x=1152..1279,y=384..511     SUCCESS                           0.08      4.32    14.954s          0.29    0.151s       0.492s     15.596s
+eddaec7e   DESKTOP-F40ABI3        x=256..383,y=512..639       SUCCESS                           0.08      4.32    22.261s          0.20    0.163s       2.164s     24.588s
+1419d600   DESKTOP-F40ABI3        x=1792..1919,y=384..511     SUCCESS                           0.08      4.32     6.948s          0.63    0.142s       8.109s     15.198s
+591957fc   DESKTOP-F40ABI3        x=0..127,y=512..639         SUCCESS                           0.07      3.89     7.090s          0.56    0.120s       1.815s      9.025s
+5638f412   localhost              x=768..895,y=512..639       SUCCESS                           0.08      4.32    17.204s          0.26    0.048s       0.790s     18.042s
+4a4a47a7   DESKTOP-F40ABI3        x=1408..1535,y=256..383     REROUTED TO localhost             0.08      4.32    12.630s          0.35    0.055s       1.015s     13.700s
+90f35102   localhost              x=1664..1791,y=384..511     SUCCESS                           0.08      4.32    19.546s          0.22    0.042s       0.717s     20.305s
+b01adbe3   DESKTOP-F40ABI3        x=640..767,y=512..639       SUCCESS                           0.08      4.32    11.561s          0.38    0.167s       3.326s     15.054s
+3ec67050   DESKTOP-F40ABI3        x=1024..1151,y=384..511     SUCCESS                           0.08      4.32    11.089s          0.40    0.126s       1.360s     12.575s
+9f442c56   DESKTOP-F40ABI3        x=512..639,y=512..639       SUCCESS                           0.08      4.32    16.038s          0.27    0.172s       0.596s     16.806s
+8fe66243   DESKTOP-F40ABI3        x=1280..1407,y=384..511     SUCCESS                           0.08      4.32    12.842s          0.34    0.160s       0.806s     13.808s
+a09835f2   DESKTOP-F40ABI3        x=1920..2047,y=384..511     SUCCESS                           0.07      3.89    26.790s          0.15    0.121s       0.570s     27.481s
+47bcf12c   localhost              x=1280..1407,y=256..383     REROUTED TO DESKTOP-F40ABI3       0.08      4.32    27.579s          0.16    0.106s       0.407s     28.092s
+bc72909f   DESKTOP-F40ABI3        x=384..511,y=512..639       SUCCESS                           0.08      4.32    13.863s          0.32    0.192s       1.143s     15.198s
+12818ada   DESKTOP-F40ABI3        x=384..511,y=640..767       SUCCESS                           0.08      4.32     6.317s          0.70    0.124s      11.923s     18.363s
+2f618414   localhost              x=1536..1663,y=384..511     SUCCESS                           0.08      4.32    91.607s          0.05    0.087s       2.064s     93.758s
+f419a9a9   DESKTOP-F40ABI3        x=256..383,y=640..767       SUCCESS                           0.08      4.32    23.780s          0.18    0.063s       0.637s     24.481s
+8b14d82a   DESKTOP-F40ABI3        x=512..639,y=640..767       SUCCESS                           0.08      4.32    17.741s          0.25    0.127s       0.845s     18.713s
+1987525f   localhost              x=0..127,y=640..767         SUCCESS                           0.07      3.89     6.057s          0.65    0.049s       0.585s      6.690s
+d8764343   localhost              x=1920..2047,y=512..639     SUCCESS                           0.07      3.89     6.107s          0.65    0.051s       0.543s      6.702s
+9eb5e9bd   DESKTOP-F40ABI3        x=640..767,y=640..767       SUCCESS                           0.08      4.32    25.600s          0.17    0.082s       0.497s     26.178s
+3957756f   DESKTOP-F40ABI3        x=1280..1407,y=0..127       REROUTED TO localhost             0.07      3.89     5.352s          0.74    0.047s       0.959s      6.359s
+1bb2bfa7   localhost              x=896..1023,y=512..639      SUCCESS                           0.08      4.32    11.935s          0.37    0.050s       1.026s     13.011s
+ba52ead8   DESKTOP-F40ABI3        x=1280..1407,y=512..639     SUCCESS                           0.08      4.32     7.014s          0.63    0.133s       2.976s     10.123s
+76e46ae8   DESKTOP-F40ABI3        x=1664..1791,y=512..639     SUCCESS                           0.08      4.32     7.022s          0.63    0.205s       6.997s     14.225s
+e9baef8e   localhost              x=1792..1919,y=512..639     SUCCESS                           0.08      4.32    12.452s          0.35    0.051s       1.110s     13.612s
+87006754   DESKTOP-F40ABI3        x=1024..1151,y=512..639     SUCCESS                           0.08      4.32     4.038s          1.09    0.186s       3.753s      7.977s
+bb434d76   DESKTOP-F40ABI3        x=1408..1535,y=512..639     SUCCESS                           0.08      4.32     3.841s          1.14    0.203s       1.276s      5.319s
+dfc112a5   localhost              x=1152..1279,y=256..383     REROUTED TO DESKTOP-F40ABI3       0.08      4.32    17.529s          0.25    0.071s       6.885s     24.484s
+8dcb7aca   DESKTOP-F40ABI3        x=1152..1279,y=512..639     SUCCESS                           0.08      4.32     7.673s          0.57    0.051s       1.851s      9.576s
+33c4df62   DESKTOP-F40ABI3        x=128..255,y=640..767       SUCCESS                           0.08      4.32    28.567s          0.15    0.124s       0.865s     29.556s
+3346f971   DESKTOP-F40ABI3        x=896..1023,y=640..767      SUCCESS                           0.08      4.32    11.569s          0.38    0.154s       5.592s     17.315s
+97b03d90   localhost              x=1920..2047,y=640..767     SUCCESS                           0.07      3.89     7.895s          0.50    0.121s       9.179s     17.195s
+e4ad94a0   DESKTOP-F40ABI3        x=768..895,y=640..767       SUCCESS                           0.08      4.32    14.465s          0.30    0.148s       0.668s     15.281s
+12087218   DESKTOP-F40ABI3        x=1792..1919,y=640..767     SUCCESS                           0.08      4.32    13.103s          0.34    0.150s       0.678s     13.931s
+3c15ef2d   localhost              x=384..511,y=768..895       SUCCESS                           0.08      4.32     8.015s          0.55    0.119s       9.179s     17.314s
+60b9998d   localhost              x=1536..1663,y=640..767     SUCCESS                           0.08      4.32     9.319s          0.47    0.050s       0.859s     10.228s
+753c4629   localhost              x=0..127,y=768..895         SUCCESS                           0.07      3.89     7.852s          0.50    0.135s       9.165s     17.153s
+445c02e4   DESKTOP-F40ABI3        x=128..255,y=768..895       SUCCESS                           0.08      4.32    15.095s          0.29    0.042s       7.206s     22.343s
+8b951be3   localhost              x=1152..1279,y=640..767     SUCCESS                           0.08      4.32    12.793s          0.34    0.088s       0.720s     13.601s
+80918f7e   DESKTOP-F40ABI3        x=1280..1407,y=640..767     SUCCESS                           0.08      4.32    11.716s          0.38    0.187s       0.728s     12.631s
+0b949f73   DESKTOP-F40ABI3        x=1024..1151,y=640..767     SUCCESS                           0.08      4.32    29.761s          0.15    0.067s       1.183s     31.011s
+c6cf5600   DESKTOP-F40ABI3        x=256..383,y=896..1023      REROUTED TO localhost             0.08      4.32    13.563s          0.32    0.077s       0.891s     14.531s
+ba0c0c8e   DESKTOP-F40ABI3        x=896..1023,y=768..895      SUCCESS                           0.08      4.32     4.697s          0.94    0.052s       3.111s      7.860s
+644e8ef4   localhost              x=128..255,y=896..1023      SUCCESS                           0.08      4.32     9.053s          0.49    0.215s       0.675s      9.943s
+229adf31   localhost              x=1280..1407,y=768..895     SUCCESS                           0.08      4.32    13.388s          0.33    0.316s       0.576s     14.280s
+592641cc   DESKTOP-F40ABI3        x=1408..1535,y=640..767     SUCCESS                           0.08      4.32    34.238s          0.13    0.075s       5.751s     40.065s
+ac8daaa8   localhost              x=1664..1791,y=768..895     SUCCESS                           0.08      4.32     8.972s          0.49    0.183s       0.712s      9.867s
+eebfd93b   localhost              x=1792..1919,y=768..895     SUCCESS                           0.08      4.32     8.799s          0.50    0.238s       0.592s      9.629s
+def6dc7c   DESKTOP-F40ABI3        x=384..511,y=896..1023      REROUTED TO localhost             0.08      4.32    21.629s          0.20    0.161s       1.082s     22.873s
+96a09c62   DESKTOP-F40ABI3        x=1024..1151,y=768..895     SUCCESS                           0.08      4.32    11.191s          0.39    0.102s       0.908s     12.201s
+b9bc69fb   DESKTOP-F40ABI3        x=768..895,y=768..895       SUCCESS                           0.08      4.32    21.189s          0.21    0.087s       1.522s     22.798s
+bca87638   localhost              x=512..639,y=896..1023      SUCCESS                           0.08      4.32     9.303s          0.47    0.170s       0.884s     10.357s
+d1e1c84e   DESKTOP-F40ABI3        x=640..767,y=896..1023      SUCCESS                           0.08      4.32     4.263s          1.03    0.068s       1.482s      5.813s
+26a4f4c0   DESKTOP-F40ABI3        x=512..639,y=768..895       SUCCESS                           0.08      4.32    49.528s          0.09    0.056s       7.952s     57.536s
+7d3702af   DESKTOP-F40ABI3        x=0..127,y=896..1023        SUCCESS                           0.07      3.89    24.110s          0.16    0.059s       1.618s     25.787s
+1877b515   localhost              x=1152..1279,y=896..1023    SUCCESS                           0.08      4.32    15.457s          0.28    0.194s       0.874s     16.526s
+489df6fc   DESKTOP-F40ABI3        x=1024..1151,y=896..1023    SUCCESS                           0.08      4.32     6.129s          0.72    0.067s       1.592s      7.788s
+225370d3   DESKTOP-F40ABI3        x=256..383,y=768..895       SUCCESS                           0.08      4.32    41.822s          0.11    0.072s       7.973s     49.867s
+d19e00a7   DESKTOP-F40ABI3        x=1408..1535,y=768..895     SUCCESS                           0.08      4.32    14.521s          0.30    0.077s       0.930s     15.529s
+72676d4e   DESKTOP-F40ABI3        x=1536..1663,y=768..895     SUCCESS                           0.08      4.32    21.193s          0.21    0.109s       1.579s     22.881s
+bad22cb5   localhost              x=768..895,y=896..1023      SUCCESS                           0.08      4.32    14.377s          0.31    0.135s       1.083s     15.595s
+5eaae86d   localhost              x=896..1023,y=896..1023     SUCCESS                           0.08      4.32    15.951s          0.28    0.201s       0.864s     17.016s
+e1cb225b   DESKTOP-F40ABI3        x=1536..1663,y=512..639     SUCCESS                           0.08      4.32    95.793s          0.05    0.168s       3.111s     99.072s
+feb3f95b   DESKTOP-F40ABI3        x=1152..1279,y=768..895     SUCCESS                           0.08      4.32    15.368s          0.29    0.050s       1.446s     16.864s
+6673e01a   DESKTOP-F40ABI3        x=384..511,y=1024..1151     SUCCESS                           0.08      4.32     5.287s          0.83    0.196s       1.245s      6.728s
+bb6cbd7b   DESKTOP-F40ABI3        x=768..895,y=1024..1151     SUCCESS                           0.08      4.32     7.799s          0.56    0.165s       1.039s      9.003s
+ff237260   localhost              x=1024..1151,y=1024..1151   SUCCESS                           0.08      4.32    10.466s          0.42    0.281s       0.891s     11.639s
+a83b1a45   localhost              x=1792..1919,y=896..1023    SUCCESS                           0.08      4.32    10.726s          0.41    0.302s       0.954s     11.982s
+4bad548c   localhost              x=896..1023,y=1024..1151    SUCCESS                           0.08      4.32    11.191s          0.39    0.313s       0.855s     12.358s
+a4fd5a3d   localhost              x=256..383,y=1024..1151     SUCCESS                           0.08      4.32    12.959s          0.34    0.271s       0.968s     14.197s
+7805e8a4   localhost              x=1280..1407,y=896..1023    SUCCESS                           0.08      4.32    36.079s          0.12    0.128s       2.061s     38.269s
+9cf57c9f   DESKTOP-F40ABI3        x=512..639,y=1024..1151     SUCCESS                           0.08      4.32    15.099s          0.29    0.067s       2.820s     17.986s
+6a0c584c   localhost              x=1664..1791,y=640..767     SUCCESS                           0.08      4.32    83.287s          0.05    0.094s       3.219s     86.600s
+518c0b44   DESKTOP-F40ABI3        x=640..767,y=1024..1151     SUCCESS                           0.08      4.32    17.335s          0.25    0.222s       1.146s     18.703s
+890427f8   DESKTOP-F40ABI3        x=1536..1663,y=1024..1151   SUCCESS                           0.08      4.32     7.408s          0.59    0.065s       2.630s     10.103s
+07b7d99a   localhost              x=1664..1791,y=1024..1151   SUCCESS                           0.08      4.32     6.434s          0.68    0.000s       3.000s      9.434s
+8431f52b   DESKTOP-F40ABI3        x=256..383,y=1152..1279     SUCCESS                           0.08      4.32     4.232s          1.04    0.078s       1.547s      5.857s
+f8e0351f   DESKTOP-F40ABI3        x=512..639,y=1152..1279     SUCCESS                           0.08      4.32     5.214s          0.84    0.064s       0.818s      6.096s
+8696ae37   DESKTOP-F40ABI3        x=1152..1279,y=1024..1151   SUCCESS                           0.08      4.32    25.229s          0.17    0.185s       1.919s     27.333s
+64aa2800   DESKTOP-F40ABI3        x=896..1023,y=1152..1279    SUCCESS                           0.08      4.32     3.775s          1.16    0.063s       1.341s      5.178s
+7ddfdfb3   DESKTOP-F40ABI3        x=640..767,y=1152..1279     SUCCESS                           0.08      4.32     9.155s          0.48    0.054s       1.488s     10.697s
+8c5f71fc   localhost              x=1920..2047,y=1024..1151   SUCCESS                           0.07      3.89    17.366s          0.23    0.000s       1.813s     19.179s
+949bff5c   localhost              x=128..255,y=1152..1279     SUCCESS                           0.08      4.32    12.617s          0.35    0.052s       4.309s     16.977s
+812b24ff   DESKTOP-F40ABI3        x=1536..1663,y=896..1023    SUCCESS                           0.08      4.32    33.400s          0.13    0.218s       1.678s     35.296s
+6aa9fb0d   DESKTOP-F40ABI3        x=1920..2047,y=896..1023    SUCCESS                           0.07      3.89    35.025s          0.11    0.185s       2.341s     37.551s
+7e52c634   localhost              x=1408..1535,y=896..1023    SUCCESS                           0.08      4.32    38.078s          0.12    0.291s       1.624s     39.993s
+a20dfbd4   localhost              x=1536..1663,y=1152..1279   SUCCESS                           0.08      4.32     7.159s          0.61    0.000s       1.870s      9.029s
+ee42ace8   DESKTOP-F40ABI3        x=1280..1407,y=1152..1279   SUCCESS                           0.08      4.32     7.219s          0.61    0.068s       4.260s     11.547s
+0177004e   DESKTOP-F40ABI3        x=1024..1151,y=1152..1279   SUCCESS                           0.08      4.32    16.108s          0.27    0.055s       2.312s     18.476s
+e4707ce7   localhost              x=1664..1791,y=1152..1279   SUCCESS                           0.08      4.32     8.984s          0.49    0.024s       2.299s     11.307s
+4d5ce327   DESKTOP-F40ABI3        x=1920..2047,y=1152..1279   SUCCESS                           0.07      3.89     5.784s          0.68    0.000s       5.039s     10.824s
+0f485100   DESKTOP-F40ABI3        x=256..383,y=1280..1407     SUCCESS                           0.08      4.32     6.019s          0.73    0.050s       1.873s      7.942s
+a352641b   DESKTOP-F40ABI3        x=1152..1279,y=1152..1279   SUCCESS                           0.08      4.32    14.982s          0.29    0.000s       6.200s     21.182s
+9e2bb4ad   localhost              x=768..895,y=1152..1279     SUCCESS                           0.08      4.32    27.538s          0.16    0.155s       1.306s     29.000s
+eef605fc   localhost              x=128..255,y=1280..1407     SUCCESS                           0.08      4.32     7.960s          0.55    0.281s       1.749s      9.990s
+175ca84e   localhost              x=1152..1279,y=1280..1407   SUCCESS                           0.08      4.32     2.441s          1.80    0.063s       0.516s      3.019s
+3c279682   DESKTOP-F40ABI3        x=768..895,y=1280..1407     SUCCESS                           0.08      4.32     3.989s          1.10    0.060s       2.869s      6.918s
+f67fd13a   DESKTOP-F40ABI3        x=640..767,y=1280..1407     SUCCESS                           0.08      4.32     4.608s          0.95    0.000s       2.860s      7.468s
+0009fa66   localhost              x=1024..1151,y=1280..1407   SUCCESS                           0.08      4.32     5.065s          0.87    0.080s       1.569s      6.713s
+c6f659c4   localhost              x=1664..1791,y=1280..1407   SUCCESS                           0.08      4.32     3.713s          1.18    0.130s       0.615s      4.457s
+0d5968ff   localhost              x=384..511,y=1152..1279     SUCCESS                           0.08      4.32    42.035s          0.10    0.091s       2.399s     44.525s
+8c6a22cf   localhost              x=1792..1919,y=1024..1151   SUCCESS                           0.08      4.32    46.254s          0.10    0.009s       4.522s     50.785s
+0927ed00   DESKTOP-F40ABI3        x=1536..1663,y=1280..1407   SUCCESS                           0.08      4.32     6.121s          0.72    0.077s       2.371s      8.569s
+b7402678   DESKTOP-F40ABI3        x=1408..1535,y=1280..1407   SUCCESS                           0.08      4.32     8.737s          0.50    0.058s       1.057s      9.852s
+113b9a4a   DESKTOP-F40ABI3        x=1408..1535,y=1024..1151   SUCCESS                           0.08      4.32    45.296s          0.10    0.069s      14.957s     60.322s
+1b9f0178   DESKTOP-F40ABI3        x=128..255,y=1408..1535     SUCCESS                           0.08      4.32     5.032s          0.87    0.058s       1.795s      6.885s
+782d3494   localhost              x=0..127,y=1408..1535       SUCCESS                           0.07      3.89     6.259s          0.63    0.056s       2.547s      8.863s
+b4d825f1   localhost              x=1920..2047,y=1280..1407   SUCCESS                           0.07      3.89     6.553s          0.60    0.067s       2.513s      9.133s
+48fe0042   DESKTOP-F40ABI3        x=1792..1919,y=1152..1279   SUCCESS                           0.08      4.32    32.302s          0.14    0.000s       4.715s     37.017s
+8e34cf1b   DESKTOP-F40ABI3        x=1280..1407,y=1024..1151   SUCCESS                           0.08      4.32    69.167s          0.06    0.182s       3.021s     72.370s
+8dfc22e2   DESKTOP-F40ABI3        x=256..383,y=1408..1535     SUCCESS                           0.08      4.32     6.882s          0.64    0.073s       0.984s      7.940s
+912fac8e   DESKTOP-F40ABI3        x=896..1023,y=1280..1407    SUCCESS                           0.08      4.32    23.657s          0.19    0.022s       1.781s     25.461s
+8065cfda   DESKTOP-F40ABI3        x=1408..1535,y=1152..1279   SUCCESS                           0.08      4.32    41.734s          0.11    0.000s       3.207s     44.941s
+88df59a7   DESKTOP-F40ABI3        x=128..255,y=1024..1151     SUCCESS                           0.08      4.32    71.349s          0.06    0.186s       3.219s     74.754s
+2d4f81f3   localhost              x=0..127,y=1152..1279       SUCCESS                           0.07      3.89    57.940s          0.07    0.210s       3.028s     61.178s
+b9068c76   localhost              x=768..895,y=1408..1535     SUCCESS                           0.08      4.32     4.910s          0.90    0.000s       1.651s      6.562s
+65a45cc4   DESKTOP-F40ABI3        x=1664..1791,y=896..1023    SUCCESS                           0.08      4.32    75.159s          0.06    0.248s       3.711s     79.118s
+09d6a212   DESKTOP-F40ABI3        x=512..639,y=1408..1535     SUCCESS                           0.08      4.32     7.259s          0.61    0.000s       2.239s      9.498s
+921f0f2b   DESKTOP-F40ABI3        x=1024..1151,y=1408..1535   SUCCESS                           0.08      4.32     6.736s          0.65    0.058s       1.632s      8.426s
+7bd8562c   DESKTOP-F40ABI3        x=1152..1279,y=1408..1535   SUCCESS                           0.08      4.32     5.653s          0.78    0.062s       2.860s      8.575s
+6b3e8c71   DESKTOP-F40ABI3        x=896..1023,y=1408..1535    SUCCESS                           0.08      4.32     8.520s          0.52    0.058s       2.849s     11.426s
+976bb02e   DESKTOP-F40ABI3        x=1408..1535,y=1408..1535   SUCCESS                           0.08      4.32     7.020s          0.63    0.057s       2.580s      9.657s
+fd02af27   DESKTOP-F40ABI3        x=384..511,y=1280..1407     SUCCESS                           0.08      4.32    38.281s          0.11    0.000s       4.012s     42.293s
+14428755   DESKTOP-F40ABI3        x=1536..1663,y=1408..1535   SUCCESS                           0.08      4.32     7.770s          0.57    0.000s       3.296s     11.066s
+80b510b6   localhost              x=1920..2047,y=768..895     REROUTED TO DESKTOP-F40ABI3       0.07      3.89    16.483s          0.24    0.000s       2.877s     19.360s
+f6b269ea   DESKTOP-F40ABI3        x=384..511,y=1536..1663     SUCCESS                           0.08      4.32     4.213s          1.04    0.000s       1.422s      5.634s
+8dd1a4b2   DESKTOP-F40ABI3        x=1920..2047,y=1408..1535   SUCCESS                           0.07      3.89    17.276s          0.23    0.000s       4.632s     21.908s
+7358d7a3   localhost              x=640..767,y=1408..1535     SUCCESS                           0.08      4.32    28.128s          0.16    0.089s       1.517s     29.734s
+63a1b8d1   DESKTOP-F40ABI3        x=640..767,y=768..895       REROUTED TO localhost             0.08      4.32    40.479s          0.11    0.171s       3.346s     43.996s
+9a41deac   localhost              x=1280..1407,y=1280..1407   SUCCESS                           0.08      4.32    38.353s          0.11    0.070s       3.262s     41.684s
+f615bd4c   DESKTOP-F40ABI3        x=640..767,y=1536..1663     SUCCESS                           0.08      4.32    15.138s          0.29    0.073s       1.881s     17.092s
+34a88bb1   DESKTOP-F40ABI3        x=1280..1407,y=1408..1535   SUCCESS                           0.08      4.32    21.525s          0.20    0.064s       1.824s     23.412s
+1301d96a   DESKTOP-F40ABI3        x=256..383,y=1536..1663     SUCCESS                           0.08      4.32     5.194s          0.85    0.000s       3.276s      8.470s
+39f7c9da   localhost              x=0..127,y=1280..1407       SUCCESS                           0.07      3.89    51.279s          0.08    0.060s       4.045s     55.383s
+5af60506   DESKTOP-F40ABI3        x=128..255,y=1536..1663     SUCCESS                           0.08      4.32     5.130s          0.86    0.000s       3.116s      8.246s
+af623a2a   DESKTOP-F40ABI3        x=0..127,y=1536..1663       SUCCESS                           0.07      3.89     4.874s          0.81    0.000s       2.312s      7.186s
+2e960f8d   DESKTOP-F40ABI3        x=768..895,y=1536..1663     SUCCESS                           0.08      4.32    44.739s          0.10    0.061s       3.054s     47.855s
+eb649115   DESKTOP-F40ABI3        x=384..511,y=1408..1535     SUCCESS                           0.08      4.32    62.415s          0.07    0.000s       5.659s     68.074s
+e4a1a0aa   localhost              x=512..639,y=1280..1407     SUCCESS                           0.08      4.32    86.225s          0.05    0.000s      12.088s     98.313s
+233f48f3   DESKTOP-F40ABI3        x=1152..1279,y=1536..1663   SUCCESS                           0.08      4.32    23.525s          0.19    0.089s       0.464s     24.078s
+1b9951ca   localhost              x=1664..1791,y=1408..1535   SUCCESS                           0.08      4.32    14.547s          0.30    0.000s      20.611s     35.158s
+edf5d0c4   localhost              x=1792..1919,y=1280..1407   SUCCESS                           0.08      4.32    76.543s          0.06    0.078s       4.752s     81.373s
+d26d338c   DESKTOP-F40ABI3        x=0..127,y=1024..1151       REROUTED TO localhost             0.07      3.89    10.706s          0.37    0.211s       0.771s     11.689s
+c37b8b6f   DESKTOP-F40ABI3        x=896..1023,y=1536..1663    SUCCESS                           0.08      4.32     2.419s          1.82    0.114s       0.401s      2.933s
+2e1cc896   localhost              x=1280..1407,y=1536..1663   SUCCESS                           0.08      4.32    38.724s          0.11    0.187s       3.341s     42.253s
+50434114   DESKTOP-F40ABI3        x=1024..1151,y=1536..1663   SUCCESS                           0.08      4.32    11.728s          0.37    0.100s       2.701s     14.529s
+7e8b8d0d   DESKTOP-F40ABI3        x=512..639,y=1536..1663     SUCCESS                           0.08      4.32    14.125s          0.31    0.013s       7.171s     21.309s
+bb4f943a   DESKTOP-F40ABI3        x=256..383,y=1664..1791     SUCCESS                           0.08      4.32     5.569s          0.79    0.145s       0.950s      6.664s
+cf0f3780   DESKTOP-F40ABI3        x=768..895,y=1664..1791     SUCCESS                           0.08      4.32     5.085s          0.86    0.128s       3.095s      8.308s
+fa7da2f5   localhost              x=0..127,y=1664..1791       SUCCESS                           0.07      3.89     7.305s          0.54    0.052s       1.010s      8.368s
+832948ca   DESKTOP-F40ABI3        x=1920..2047,y=1536..1663   SUCCESS                           0.07      3.89     3.744s          1.06    0.122s       4.422s      8.288s
+1ce06179   localhost              x=640..767,y=1664..1791     SUCCESS                           0.08      4.32     9.334s          0.47    0.245s       0.749s     10.327s
+fdcd22d1   DESKTOP-F40ABI3        x=384..511,y=1664..1791     SUCCESS                           0.08      4.32     7.846s          0.56    0.110s       1.025s      8.981s
+4c80b4e8   localhost              x=0..127,y=1792..1919       REROUTED TO DESKTOP-F40ABI3       0.07      3.89     4.930s          0.80    0.051s       2.884s      7.866s
+fe23c219   DESKTOP-F40ABI3        x=1664..1791,y=1664..1791   SUCCESS                           0.08      4.32     5.198s          0.85    0.047s       1.290s      6.535s
+ab98d34d   DESKTOP-F40ABI3        x=1280..1407,y=1664..1791   SUCCESS                           0.08      4.32     6.393s          0.69    0.067s       1.296s      7.756s
+d2b257cb   localhost              x=1024..1151,y=1664..1791   SUCCESS                           0.08      4.32    17.743s          0.25    0.220s       1.344s     19.306s
+1f7c8831   DESKTOP-F40ABI3        x=128..255,y=1792..1919     SUCCESS                           0.08      4.32     2.423s          1.81    0.105s       1.494s      4.022s
+392b9745   DESKTOP-F40ABI3        x=128..255,y=1664..1791     SUCCESS                           0.08      4.32    11.548s          0.38    0.068s       1.021s     12.637s
+0272df01   DESKTOP-F40ABI3        x=1792..1919,y=1664..1791   SUCCESS                           0.08      4.32     9.408s          0.47    0.110s       1.717s     11.236s
+2af39cd0   localhost              x=1408..1535,y=1664..1791   SUCCESS                           0.08      4.32    12.046s          0.37    0.182s       0.795s     13.024s
+b5d81a02   localhost              x=1536..1663,y=1536..1663   SUCCESS                           0.08      4.32    23.149s          0.19    0.053s       1.618s     24.820s
+6f2cbf9a   localhost              x=1408..1535,y=1536..1663   SUCCESS                           0.08      4.32    25.354s          0.17    0.178s       1.508s     27.040s
+b524ba4a   DESKTOP-F40ABI3        x=1024..1151,y=1792..1919   SUCCESS                           0.08      4.32     7.022s          0.63    0.000s       1.494s      8.516s
+e8aed114   DESKTOP-F40ABI3        x=384..511,y=1792..1919     SUCCESS                           0.08      4.32    15.207s          0.29    0.113s       1.223s     16.543s
+8a6948bc   DESKTOP-F40ABI3        x=1536..1663,y=1664..1791   SUCCESS                           0.08      4.32    16.048s          0.27    0.107s       1.219s     17.374s
+3a8dc674   DESKTOP-F40ABI3        x=1152..1279,y=1792..1919   SUCCESS                           0.08      4.32     7.927s          0.55    0.000s       2.015s      9.942s
+38b54f4e   DESKTOP-F40ABI3        x=1280..1407,y=1792..1919   SUCCESS                           0.08      4.32     5.269s          0.83    0.057s       1.620s      6.946s
+1753654c   DESKTOP-F40ABI3        x=1920..2047,y=1664..1791   SUCCESS                           0.07      3.89    17.167s          0.23    0.105s       1.048s     18.320s
+8bd4f0bf   DESKTOP-F40ABI3        x=512..639,y=1792..1919     SUCCESS                           0.08      4.32    10.529s          0.42    0.000s       1.833s     12.362s
+e8f8dec0   DESKTOP-F40ABI3        x=256..383,y=1920..2047     SUCCESS                           0.07      3.89     4.146s          0.95    0.047s       1.863s      6.056s
+2565bfbd   DESKTOP-F40ABI3        x=0..127,y=1920..2047       SUCCESS                           0.06      3.50     4.993s          0.71    0.095s       1.809s      6.897s
+c0704a0c   DESKTOP-F40ABI3        x=384..511,y=1920..2047     SUCCESS                           0.07      3.89     4.358s          0.91    0.045s       1.549s      5.952s
+0aa79ff9   DESKTOP-F40ABI3        x=768..895,y=1792..1919     SUCCESS                           0.08      4.32    14.990s          0.29    0.000s       1.921s     16.910s
+5d777cd2   DESKTOP-F40ABI3        x=1792..1919,y=1792..1919   SUCCESS                           0.08      4.32     7.593s          0.58    0.000s       1.626s      9.219s
+3167e84d   DESKTOP-F40ABI3        x=512..639,y=1920..2047     SUCCESS                           0.07      3.89     5.436s          0.73    0.000s       1.933s      7.369s
+e004b4b7   localhost              x=1408..1535,y=1792..1919   SUCCESS                           0.08      4.32    11.334s          0.39    0.059s       4.196s     15.589s
+614466b4   localhost              x=896..1023,y=1792..1919    SUCCESS                           0.08      4.32    14.024s          0.31    0.000s       6.801s     20.825s
+1da10fd0   DESKTOP-F40ABI3        x=1920..2047,y=1792..1919   SUCCESS                           0.07      3.89    11.058s          0.36    0.000s       1.595s     12.654s
+fe3018bd   localhost              x=1152..1279,y=1664..1791   SUCCESS                           0.08      4.32    29.979s          0.15    0.071s       2.050s     32.100s
+a76968d8   DESKTOP-F40ABI3        x=1280..1407,y=1920..2047   SUCCESS                           0.07      3.89     4.750s          0.83    0.108s       2.667s      7.525s
+69292756   DESKTOP-F40ABI3        x=768..895,y=1920..2047     SUCCESS                           0.07      3.89     6.382s          0.62    0.112s       4.756s     11.250s
+b7509d62   DESKTOP-F40ABI3        x=1152..1279,y=1920..2047   SUCCESS                           0.07      3.89     7.109s          0.56    0.000s       3.212s     10.321s
+d85b2d4e   DESKTOP-F40ABI3        x=640..767,y=1920..2047     SUCCESS                           0.07      3.89     9.580s          0.41    0.070s       2.322s     11.971s
+85b2f7ae   DESKTOP-F40ABI3        x=1664..1791,y=1920..2047   SUCCESS                           0.07      3.89     6.279s          0.63    0.045s       3.881s     10.205s
+56c8f4ef   DESKTOP-F40ABI3        x=1024..1151,y=1920..2047   SUCCESS                           0.07      3.89     9.835s          0.40    0.064s       4.700s     14.599s
+16ca1976   DESKTOP-F40ABI3        x=896..1023,y=1920..2047    SUCCESS                           0.07      3.89     9.336s          0.42    0.070s       6.105s     15.510s
+8e163f6a   localhost              x=896..1023,y=1664..1791    SUCCESS                           0.08      4.32    49.428s          0.09    0.094s       2.358s     51.880s
+6bd5b8f5   DESKTOP-F40ABI3        x=512..639,y=1664..1791     SUCCESS                           0.08      4.32    49.759s          0.09    0.132s       2.368s     52.260s
+361b553b   DESKTOP-F40ABI3        x=1664..1791,y=1536..1663   SUCCESS                           0.08      4.32    49.674s          0.09    0.081s       2.530s     52.286s
+5e7943b2   localhost              x=1664..1791,y=1792..1919   SUCCESS                           0.08      4.32    24.529s          0.18    0.167s       2.328s     27.023s
+67df09c9   DESKTOP-F40ABI3        x=1920..2047,y=1920..2047   SUCCESS                           0.06      3.50     6.263s          0.57    0.000s       1.418s      7.682s
+a98b99ea   DESKTOP-F40ABI3        x=128..255,y=1920..2047     SUCCESS                           0.07      3.89    23.096s          0.17    0.000s       2.841s     25.937s
+c7115475   localhost              x=1536..1663,y=1920..2047   SUCCESS                           0.07      3.89    16.649s          0.24    0.074s       0.876s     17.599s
+80dc6284   localhost              x=1792..1919,y=1920..2047   SUCCESS                           0.07      3.89    10.824s          0.37    0.000s       3.557s     14.381s
+1a3fe8cf   DESKTOP-F40ABI3        x=640..767,y=1792..1919     SUCCESS                           0.08      4.32    37.480s          0.12    0.000s       2.104s     39.584s
+5d565c8d   DESKTOP-F40ABI3        x=1792..1919,y=1536..1663   SUCCESS                           0.08      4.32    57.642s          0.08    0.121s       2.419s     60.181s
+47f433e4   localhost              x=1408..1535,y=1920..2047   SUCCESS                           0.07      3.89    18.617s          0.21    0.000s       2.700s     21.317s
+292cabd9   localhost              x=1792..1919,y=1408..1535   REROUTED TO DESKTOP-F40ABI3       0.08      4.32     1.723s          2.55    0.066s       0.438s      2.226s
+43ed49ef   localhost              x=256..383,y=1792..1919     SUCCESS                           0.08      4.32    53.032s          0.08    0.150s       1.747s     54.929s
+30e13791   localhost              x=1536..1663,y=1792..1919   SUCCESS                           0.08      4.32    38.925s          0.11    0.092s       4.978s     43.995s
+[RECOVERY] retries=20 recovery_time=305.843s
+[TASK FAILED] task=9788f70c49a94a8badd004eb00f9fc3b worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=9788f70c49a94a8badd004eb00f9fc3b attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[RETRY WAIT] task=9788f70c49a94a8badd004eb00f9fc3b worker=DESKTOP-F40ABI3 is busy; will try again
+[RETRY] task=9788f70c49a94a8badd004eb00f9fc3b attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=38107ec2bae6491eb229f4ac16f73682 worker=localhost@192.168.1.104 reason=ConnectionResetError: [Errno 104] Connection reset by peer
+[RETRY] task=38107ec2bae6491eb229f4ac16f73682 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=a75fdeb81e604c77a60fde15438a3fae worker=localhost@192.168.1.104 reason=ConnectionError: peer closed the connection
+[RETRY] task=a75fdeb81e604c77a60fde15438a3fae attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=2866266e2d754f8cab6ae7d46f5702d6 worker=localhost@192.168.1.104 reason=ConnectionResetError: [Errno 104] Connection reset by peer
+[RETRY] task=2866266e2d754f8cab6ae7d46f5702d6 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=378e227a260b4694951b344c68574997 worker=localhost@192.168.1.104 reason=ConnectionResetError: [Errno 104] Connection reset by peer
+[RETRY] task=378e227a260b4694951b344c68574997 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=10ed2860101f4e77be79a1e2cf6b6086 worker=DESKTOP-F40ABI3@192.168.1.10 reason=ConnectionError: peer closed the connection
+[RETRY] task=10ed2860101f4e77be79a1e2cf6b6086 attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=1c7e7ea6125e4787b820f2ef19260534 worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=1c7e7ea6125e4787b820f2ef19260534 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=f981e27d58394365b54334f6d661e9aa worker=DESKTOP-F40ABI3@192.168.1.10 reason=ConnectionError: peer closed the connection
+[RETRY] task=f981e27d58394365b54334f6d661e9aa attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=393a8b0e81e0494380e2cb77eedd2fa7 worker=DESKTOP-F40ABI3@192.168.1.10 reason=ConnectionError: peer closed the connection
+[RETRY] task=393a8b0e81e0494380e2cb77eedd2fa7 attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=4a4a47a766c54209be37164d6c1e76bb worker=DESKTOP-F40ABI3@192.168.1.10 reason=ConnectionError: peer closed the connection
+[RETRY] task=4a4a47a766c54209be37164d6c1e76bb attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=47bcf12cae294e5eb45b43915839e487 worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=47bcf12cae294e5eb45b43915839e487 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=3957756f43d5435ea5060b472473e2ed worker=DESKTOP-F40ABI3@192.168.1.10 reason=ConnectionError: peer closed the connection
+[RETRY] task=3957756f43d5435ea5060b472473e2ed attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=dfc112a5f1e64508863bf3c2cfe3596e worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=dfc112a5f1e64508863bf3c2cfe3596e attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[WORKER BUSY] task=c6cf5600f5724619982466651e3fda2e worker=DESKTOP-F40ABI3@192.168.1.10 reason=WorkerBusyError: DESKTOP-F40ABI3 rejected task: all process slots are busy
+[RETRY] task=c6cf5600f5724619982466651e3fda2e attempt=1 target=localhost@192.168.1.104
+[WORKER BUSY] task=def6dc7c03d7407a8397c688bd81ecc3 worker=DESKTOP-F40ABI3@192.168.1.10 reason=WorkerBusyError: DESKTOP-F40ABI3 rejected task: all process slots are busy
+[RETRY] task=def6dc7c03d7407a8397c688bd81ecc3 attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=80b510b62e504a80a39a9805978e7480 worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=80b510b62e504a80a39a9805978e7480 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=63a1b8d1e34c4a4ab010a0faa9012e39 worker=DESKTOP-F40ABI3@192.168.1.10 reason=ConnectionError: peer closed the connection
+[RETRY] task=63a1b8d1e34c4a4ab010a0faa9012e39 attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=d26d338c599c4d8b82813a5316f8b439 worker=DESKTOP-F40ABI3@192.168.1.10 reason=TimeoutError: timed out
+[RETRY] task=d26d338c599c4d8b82813a5316f8b439 attempt=1 target=localhost@192.168.1.104
+[WORKER BUSY] task=4c80b4e82f644278a960e4ca37ba7929 worker=localhost@192.168.1.104 reason=WorkerBusyError: localhost rejected task: all process slots are busy
+[RETRY] task=4c80b4e82f644278a960e4ca37ba7929 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=292cabd9522e4a659537f7d1fb642b2c worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=292cabd9522e4a659537f7d1fb642b2c attempt=1 target=DESKTOP-F40ABI3@192.168.1.10

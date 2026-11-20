@@ -14,7 +14,22 @@ def read_image(path: str | Path) -> np.ndarray:
 def checksum(array: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()[:16]
 
-def process_slice(image: np.ndarray, scale: float) -> np.ndarray:
+def process_slice(
+    image: np.ndarray,
+    scale: float,
+    operation: str = "upscale",
+    nlm_search_window: int = 21,
+) -> np.ndarray:
+    if operation == "nlm":
+        # OpenCV's colored NLM expects BGR; the rest of the application uses RGB.
+        bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        denoised = cv2.fastNlMeansDenoisingColored(
+            bgr, None, 3, 3, 7, nlm_search_window,
+        )
+        return cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB)
+    if operation != "upscale":
+        raise ValueError(f"unsupported image operation: {operation}")
+
     height, width = image.shape[:2]
     target = cv2.resize(image, (max(1, round(width * scale)), max(1, round(height * scale))), interpolation=cv2.INTER_LANCZOS4)
     lab = cv2.cvtColor(target, cv2.COLOR_RGB2LAB)

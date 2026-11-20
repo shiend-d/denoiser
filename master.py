@@ -158,7 +158,10 @@ def discover_workers(timeout: float = 1.5) -> list[dict]:
     return list(found.values())
 
 
-def remote_task(worker: dict, task: dict, scale: float, timeout: float = SOCKET_TIMEOUT) -> tuple[dict, np.ndarray]:
+def remote_task(
+    worker: dict, task: dict, scale: float, operation: str,
+    nlm_search_window: int, timeout: float = SOCKET_TIMEOUT,
+) -> tuple[dict, np.ndarray]:
     image = task["image"]
     task_started = time.perf_counter()
     connect_started = time.perf_counter()
@@ -169,7 +172,12 @@ def remote_task(worker: dict, task: dict, scale: float, timeout: float = SOCKET_
     with socket.create_connection((worker["ip"], worker["port"]), timeout=min(timeout, 10.0)) as sock:
         connect_seconds = time.perf_counter() - connect_started
         sock.settimeout(timeout)
-        send_json(sock, {"version": PROTOCOL_VERSION, "task_id": task["id"], "shape": list(image.shape), "scale": scale, "checksum": checksum(image)})
+        send_json(sock, {
+            "version": PROTOCOL_VERSION, "task_id": task["id"],
+            "shape": list(image.shape), "scale": scale,
+            "operation": operation, "nlm_search_window": nlm_search_window,
+            "checksum": checksum(image),
+        })
         acknowledgement = recv_json(sock)
         if acknowledgement.get("busy"):
             raise WorkerBusyError(f"{worker['host']} rejected task: all process slots are busy")
@@ -221,9 +229,38 @@ def empty_worker_stats(host: str) -> dict:
     }
 
 
-def local_piece(args: tuple[bytes, tuple[int, ...], float]) -> np.ndarray:
-    raw, shape, scale = args
-    return process_slice(np.frombuffer(raw, dtype=np.uint8).reshape(shape).copy(), scale)
+def local_piece(args: tuple[bytes, tuple[int, ...], float, str, int]) -> np.ndarray:
+    raw, shape, scale, operation, nlm_search_window = args
+    return process_slice(
+        np.frombuffer(raw, dtype=np.uint8).reshape(shape).copy(),
+        scale, operation, nlm_search_window,
+    )
+
+
+def make_tile_tasks(image: np.ndarray, tile_size: int, overlap: int) -> tuple[list[dict], int, int]:
+    """Build the same row-major tile set for sequential, local, and remote modes."""
+    height, width = image.shape[:2]
+    columns = (width + tile_size - 1) // tile_size
+    rows = (height + tile_size - 1) // tile_size
+    count = columns * rows
+    tasks = []
+    for y in range(0, height, tile_size):
+        y_end = min(height, y + tile_size)
+        context_y0 = max(0, y - overlap)
+        context_y1 = min(height, y_end + overlap)
+        for x in range(0, width, tile_size):
+            x_end = min(width, x + tile_size)
+            context_x0 = max(0, x - overlap)
+            context_x1 = min(width, x_end + overlap)
+            tasks.append({
+                "id": uuid.uuid4().hex,
+                "label": f"{len(tasks) + 1}/{count}",
+                "x": x, "x_end": x_end,
+                "y": y, "y_end": y_end,
+                "context_x0": context_x0, "context_y0": context_y0,
+                "image": image[context_y0:context_y1, context_x0:context_x1],
+            })
+    return tasks, columns, rows
 
 
 def crop_tile_core(part: np.ndarray, task: dict, scale: float) -> np.ndarray:
@@ -264,10 +301,37 @@ def crop_tile_core(part: np.ndarray, task: dict, scale: float) -> np.ndarray:
     return core
 
 
+def stitch_tile_pieces(
+    pieces: dict[tuple[int, int], np.ndarray], height: int, width: int, scale: float,
+) -> np.ndarray:
+    output = np.empty((round(height * scale), round(width * scale), 3), dtype=np.uint8)
+    for (tile_y, tile_x), part in pieces.items():
+        out_y = round(tile_y * scale)
+        out_x = round(tile_x * scale)
+        output[out_y:out_y + part.shape[0], out_x:out_x + part.shape[1]] = part
+    return output
+
+
+def process_tiles_sequential(
+    image: np.ndarray, scale: float, tile_size: int, overlap: int,
+    operation: str, nlm_search_window: int,
+) -> tuple[np.ndarray, int, int]:
+    """Run the shared tile workload serially in the current single process."""
+    height, width = image.shape[:2]
+    tasks, columns, rows = make_tile_tasks(image, tile_size, overlap)
+    pieces = {}
+    for task in tasks:
+        processed = process_slice(task["image"], scale, operation, nlm_search_window)
+        pieces[(task["y"], task["x"])] = crop_tile_core(processed, task, scale)
+    return stitch_tile_pieces(pieces, height, width, scale), columns, rows
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Distributed image upscaler coordinator")
+    parser = argparse.ArgumentParser(description="Distributed image processing coordinator")
     parser.add_argument("--input")
+    parser.add_argument("--operation", choices=("upscale", "nlm"), help="image operation to benchmark")
     parser.add_argument("--scale", type=scale_arg)
+    parser.add_argument("--nlm-search-window", type=int, help="odd NLM search window; larger values take longer")
     parser.add_argument("--mode", choices=("sequential", "local-parallel", "distributed"))
     parser.add_argument("--worker", action="append", default=[], metavar="HOST[:PORT]")
     parser.add_argument("--workers", type=int, help="limit discovered workers")
@@ -278,11 +342,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.tile_size < 1:
         parser.error("--tile-size must be at least 1")
+    if args.nlm_search_window is not None and (args.nlm_search_window < 7 or args.nlm_search_window % 2 == 0):
+        parser.error("--nlm-search-window must be an odd integer of at least 7")
     workers: list[dict] = []
     planned_worker_count = 0
     # No-argument launch is the guided terminal interface used for demos.
     if not args.input:
-        print("=== Distributed Image Upscaler ===")
+        print("=== Distributed Image Processor ===")
         while True:
             entered_path = input("Image path or filename in before/: ").strip()
             candidate = Path(entered_path).expanduser()
@@ -294,9 +360,31 @@ def main() -> None:
                 args.input = str(before_candidate)
                 break
             print("File not found. Enter a valid path or a filename located in before/.")
-        while args.scale is None:
-            try: args.scale = scale_arg(input("Upscale factor (1.0-10.0): ").strip())
-            except (ValueError, argparse.ArgumentTypeError) as exc: print(f"Invalid scale: {exc}")
+        if args.operation is None:
+            print("\nChoose image operation:\n  1) Upscale: enlarge and enhance the image\n  2) NLM: denoise while keeping the original dimensions")
+            operations = {"1": "upscale", "2": "nlm"}
+            while args.operation not in operations.values():
+                args.operation = operations.get(input("Operation [1-2]: ").strip())
+        if args.operation == "upscale":
+            while args.scale is None:
+                try: args.scale = scale_arg(input("Upscale factor (1.0-10.0): ").strip())
+                except (ValueError, argparse.ArgumentTypeError) as exc: print(f"Invalid scale: {exc}")
+        else:
+            args.scale = 1.0
+            if args.nlm_search_window is None:
+                while True:
+                    entered = input("NLM search window [21, odd number at least 7; larger is slower]: ").strip()
+                    if not entered:
+                        args.nlm_search_window = 21
+                        break
+                    try:
+                        candidate_window = int(entered)
+                        if candidate_window >= 7 and candidate_window % 2 == 1:
+                            args.nlm_search_window = candidate_window
+                            break
+                    except ValueError:
+                        pass
+                    print("Enter an odd integer of at least 7.")
         print("\nChoose execution mode:\n  1) Sequential baseline: one process on Master\n  2) Local parallel: multiple processes on Master\n  3) Distributed: selected Workers process image tiles concurrently")
         modes = {"1": "sequential", "2": "local-parallel", "3": "distributed"}
         while args.mode not in modes.values(): args.mode = modes.get(input("Mode [1-3]: ").strip())
@@ -325,6 +413,21 @@ def main() -> None:
             args.fault_tolerance = input("Enable fault tolerance? [y/N]: ").strip().lower() in ("y", "yes")
             print("[FAULT TOLERANCE] Y: failed tasks retry on another Worker, with waits for busy slots. N: no retry; processing continues and missing regions are saved in magenta.")
         print()
+    else:
+        args.operation = args.operation or "upscale"
+        if args.operation == "nlm":
+            if args.scale is not None and args.scale != 1.0:
+                parser.error("--scale must be 1.0 or omitted when --operation nlm is selected")
+            args.scale = 1.0
+            args.nlm_search_window = args.nlm_search_window or 21
+        elif args.scale is None:
+            parser.error("--scale is required for --operation upscale")
+    if args.operation == "upscale":
+        args.nlm_search_window = args.nlm_search_window or 21
+    tile_overlap = max(
+        DEFAULT_OVERLAP,
+        args.nlm_search_window // 2 + 7 // 2 if args.operation == "nlm" else DEFAULT_OVERLAP,
+    )
     args.mode = args.mode or "distributed"
     # Discovery is setup and must not be included in T_run.
     if args.mode == "distributed":
@@ -343,17 +446,34 @@ def main() -> None:
             parser.error("no Workers discovered; start worker.py before launching Master")
         planned_worker_count = len(workers)
         all_workers = list(workers)
+        if args.operation not in {"upscale", "nlm"}:
+            parser.error(f"unsupported image operation: {args.operation}")
+        unsupported = [w for w in workers if args.operation not in w.get("operations", ["upscale"])]
+        if unsupported:
+            names = ", ".join(f"{w['host']}@{w['ip']}" for w in unsupported)
+            parser.error(f"Workers {names} do not advertise operation '{args.operation}'; update worker.py and restart them")
         print("[MASTER] Selected Workers: " + ", ".join(f"{w['host']}@{w['ip']}" for w in workers))
     image = read_image(args.input)
     h, w, _ = image.shape
-    print(f"[MASTER] {args.input} {w}x{h} mode={args.mode} scale={args.scale}")
+    operation_description = (
+        f"NLM search_window={args.nlm_search_window}"
+        if args.operation == "nlm" else f"upscale scale={args.scale}"
+    )
+    print(f"[MASTER] {args.input} {w}x{h} operation={operation_description} mode={args.mode}")
     baseline_seconds = None
     if args.mode != "sequential":
-        print("[BENCHMARK] Measuring sequential baseline...")
+        print("[BENCHMARK] Measuring single-process baseline using the same image tiles...")
         baseline_started = time.perf_counter()
-        sequential_result = process_slice(image, args.scale)
+        sequential_result, baseline_columns, baseline_rows = process_tiles_sequential(
+            image, args.scale, args.tile_size, tile_overlap,
+            args.operation, args.nlm_search_window,
+        )
         baseline_seconds = time.perf_counter() - baseline_started
-        print(f"[BENCHMARK] sequential={baseline_seconds:.3f}s checksum={checksum(sequential_result)}")
+        print(
+            f"[BENCHMARK] sequential={baseline_seconds:.3f}s "
+            f"grid={baseline_columns}x{baseline_rows} tasks={baseline_columns * baseline_rows} "
+            f"checksum={checksum(sequential_result)}"
+        )
     worker_stats: dict[str, dict] = {}
     task_details: list[dict] = []
     failure_events: list[str] = []
@@ -365,41 +485,43 @@ def main() -> None:
     parallel_wall_seconds = 0.0
     stitching_seconds = 0.0
     if args.mode == "sequential":
-        result = process_slice(image, args.scale)
+        preparation_started = time.perf_counter()
+        tasks, tile_columns, tile_rows = make_tile_tasks(image, args.tile_size, tile_overlap)
+        task_count = len(tasks)
+        process_slots = 1
+        task_preparation_seconds = time.perf_counter() - preparation_started
+        print(
+            f"[TASK DECOMPOSITION] core_tile={args.tile_size}x{args.tile_size} "
+            f"grid={tile_columns}x{tile_rows} task_count={task_count} "
+            f"context={tile_overlap}px process_slots=1"
+        )
+        pieces = {}
+        for task in tasks:
+            processed = process_slice(task["image"], args.scale, args.operation, args.nlm_search_window)
+            pieces[(task["y"], task["x"])] = crop_tile_core(processed, task, args.scale)
+        result = stitch_tile_pieces(pieces, h, w, args.scale)
     else:
         preparation_started = time.perf_counter()
-        tasks = []
         process_slots = (sum(max(1, int(worker.get("slots", worker.get("cores", 1)))) for worker in workers)
                          if args.mode == "distributed" else (multiprocessing.cpu_count() or 1))
-        tile_columns = (w + args.tile_size - 1) // args.tile_size
-        tile_rows = (h + args.tile_size - 1) // args.tile_size
+        tasks, tile_columns, tile_rows = make_tile_tasks(image, args.tile_size, tile_overlap)
         task_count = tile_columns * tile_rows
         print(
             f"[TASK DECOMPOSITION] core_tile={args.tile_size}x{args.tile_size} "
             f"grid={tile_columns}x{tile_rows} task_count={task_count} "
-            f"context={DEFAULT_OVERLAP}px process_slots={process_slots}"
+            f"context={tile_overlap}px process_slots={process_slots}"
         )
-        for y in range(0, h, args.tile_size):
-            y_end = min(h, y + args.tile_size)
-            context_y0 = max(0, y - DEFAULT_OVERLAP)
-            context_y1 = min(h, y_end + DEFAULT_OVERLAP)
-            for x in range(0, w, args.tile_size):
-                x_end = min(w, x + args.tile_size)
-                context_x0 = max(0, x - DEFAULT_OVERLAP)
-                context_x1 = min(w, x_end + DEFAULT_OVERLAP)
-                tasks.append({
-                    "id": uuid.uuid4().hex,
-                    "x": x, "x_end": x_end,
-                    "y": y, "y_end": y_end,
-                    "context_x0": context_x0, "context_y0": context_y0,
-                    "image": image[context_y0:context_y1, context_x0:context_x1],
-                })
         task_preparation_seconds = time.perf_counter() - preparation_started
         pieces: dict[tuple[int, int], np.ndarray] = {}
         parallel_started = time.perf_counter()
         if args.mode == "local-parallel":
             with concurrent.futures.ProcessPoolExecutor() as pool:
-                futures = {pool.submit(local_piece, (t["image"].tobytes(), t["image"].shape, args.scale)): t for t in tasks}
+                futures = {
+                    pool.submit(
+                        local_piece,
+                        (t["image"].tobytes(), t["image"].shape, args.scale, args.operation, args.nlm_search_window),
+                    ): t for t in tasks
+                }
                 for f, t in futures.items():
                     pieces[(t["y"], t["x"])] = crop_tile_core(f.result(), t, args.scale)
         else:
@@ -421,7 +543,9 @@ def main() -> None:
                 def submit(worker, task):
                     task.setdefault("assigned_worker", worker["host"])
                     task.setdefault("assigned_worker_ip", worker["ip"])
-                    active[pool.submit(remote_task, worker, task, args.scale)] = (worker, task)
+                    active[pool.submit(
+                        remote_task, worker, task, args.scale, args.operation, args.nlm_search_window
+                    )] = (worker, task)
                 if args.scheduler == "static":
                     assignments = [[] for _ in slots]
                     for index, task in enumerate(pending_tasks): assignments[index % len(slots)].append(task)
@@ -453,14 +577,14 @@ def main() -> None:
                             )
                             failed_stats["failed"] += 1
                             event = "WORKER BUSY" if isinstance(first_error, WorkerBusyError) else "TASK FAILED"
-                            failure_line = f"[{event}] task={task['id']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}"
+                            failure_line = f"[{event}] task={task['label']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}"
                             print(failure_line); failure_events.append(failure_line)
                             if not args.fault_tolerance:
                                 workers = [w for w in workers if w["ip"] != failed_worker["ip"]]
                                 slots = [w for w in slots if w["ip"] != failed_worker["ip"]]
                                 task["status"] = "FAILED"
                                 failed_tasks.append(task); lost = True
-                                print(f"[PARTIAL] task={task['id']} marked missing; its output region will be highlighted")
+                                print(f"[PARTIAL] task={task['label']} marked missing; its output region will be highlighted")
                             else:
                                 recovery_started = time.perf_counter()
                                 recovered = False
@@ -471,34 +595,36 @@ def main() -> None:
                                 for retry_round in range(1, 5):
                                     saw_busy = False
                                     for candidate in retry_candidates:
-                                        retry_line = f"[RETRY] task={task['id']} attempt={retry_round} target={candidate['host']}@{candidate['ip']}"
+                                        retry_line = f"[RETRY] task={task['label']} attempt={retry_round} target={candidate['host']}@{candidate['ip']}"
                                         print(retry_line); failure_events.append(retry_line)
                                         try:
-                                            response, part = remote_task(candidate, task, args.scale)
+                                            response, part = remote_task(
+                                                candidate, task, args.scale, args.operation, args.nlm_search_window
+                                            )
                                             worker = candidate; recovered = True; retried = True
                                             break
                                         except WorkerBusyError as retry_error:
                                             saw_busy = True
-                                            busy_line = f"[RETRY WAIT] task={task['id']} worker={candidate['host']} is busy; will try again"
+                                            busy_line = f"[RETRY WAIT] task={task['label']} worker={candidate['host']} is busy; will try again"
                                             print(busy_line); failure_events.append(busy_line)
                                         except Exception as retry_error:
-                                            retry_error_line = f"[RETRY FAILED] task={task['id']} worker={candidate['host']} reason={type(retry_error).__name__}: {retry_error}"
+                                            retry_error_line = f"[RETRY FAILED] task={task['label']} worker={candidate['host']} reason={type(retry_error).__name__}: {retry_error}"
                                             print(retry_error_line); failure_events.append(retry_error_line)
                                     if recovered:
                                         break
                                     if retry_round < 4:
                                         delay = min(2 ** (retry_round - 1), 8)
-                                        wait_line = f"[RETRY BACKOFF] task={task['id']} round={retry_round} wait={delay}s" + (" (Workers busy)" if saw_busy else "")
+                                        wait_line = f"[RETRY BACKOFF] task={task['label']} round={retry_round} wait={delay}s" + (" (Workers busy)" if saw_busy else "")
                                         print(wait_line); failure_events.append(wait_line)
                                         time.sleep(delay)
                                 if not recovered:
                                     task["status"] = "FAILED"
                                     failed_tasks.append(task); lost = True
-                                    print(f"[PARTIAL] task={task['id']} retry limit reached; output region will be highlighted")
+                                    print(f"[PARTIAL] task={task['label']} retry limit reached; output region will be highlighted")
                                 else:
                                     task_recovery = time.perf_counter() - recovery_started
                                     recovery_seconds += task_recovery
-                                    print(f"[RECOVERED] task={task['id']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
+                                    print(f"[RECOVERED] task={task['label']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
                         if not lost:
                             transport = response.get("transport", {})
                             task_window = [tuple(transport.get("task_interval", (0, 0)))]
@@ -549,13 +675,13 @@ def main() -> None:
                                 task_status = "SUCCESS"
                             task["status"] = task_status
                             region = f"x={task['x']}..{task['x_end']-1},y={task['y']}..{task['y_end']-1}"
-                            detail = {"id": task["id"], "worker": task.get("assigned_worker", worker["host"]), "status": task_status, "region": region, "bytes_in": transport.get("sent_bytes", task["image"].nbytes), "bytes_out": transport.get("received_bytes", 0), "connect": transport.get("connect", 0), "upload": transport.get("upload", 0), "busy_wait": transport.get("busy_wait", 0), "worker_wait": transport.get("worker_wait", 0), "compute": response.get("compute_seconds", 0), "download": transport.get("download", 0), "total": transport.get("total", 0), "retried": retried}
+                            detail = {"id": task["id"], "label": task["label"], "worker": task.get("assigned_worker", worker["host"]), "status": task_status, "region": region, "bytes_in": transport.get("sent_bytes", task["image"].nbytes), "bytes_out": transport.get("received_bytes", 0), "connect": transport.get("connect", 0), "upload": transport.get("upload", 0), "busy_wait": transport.get("busy_wait", 0), "worker_wait": transport.get("worker_wait", 0), "compute": response.get("compute_seconds", 0), "download": transport.get("download", 0), "total": transport.get("total", 0), "retried": retried}
                             detail["network"] = task_network
                             detail["network_intervals"] = task_network_intervals
                             detail["compute"] = task_compute
                             detail["other"] = task_other
                             task_details.append(detail)
-                            print(f"[TASK] {task['id'][:8]} -> {worker['host']} tile={region} connect={detail['connect']:.3f}s network={detail['network']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s task_data={detail['bytes_in']/1e6:.2f}MB result_data={detail['bytes_out']/1e6:.2f}MB")
+                            print(f"[TASK] {task['label']} -> {worker['host']} tile={region} connect={detail['connect']:.3f}s network={detail['network']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s task_data={detail['bytes_in']/1e6:.2f}MB result_data={detail['bytes_out']/1e6:.2f}MB")
                             pieces[(task["y"], task["x"])] = crop_tile_core(part, task, args.scale)
                             completed += 1
                         if args.scheduler == "dynamic" and pending_tasks and slots:
@@ -570,32 +696,32 @@ def main() -> None:
                     pending_tasks.clear()
         parallel_wall_seconds = time.perf_counter() - parallel_started
         stitching_started = time.perf_counter()
-        output_shape = (round(h * args.scale), round(w * args.scale), 3)
         if failed_tasks:
-            result = np.full(output_shape, (255, 0, 255), dtype=np.uint8)
+            result = np.full((round(h * args.scale), round(w * args.scale), 3), (255, 0, 255), dtype=np.uint8)
             for (task_y, task_x), part in pieces.items():
                 out_y = round(task_y * args.scale)
                 out_x = round(task_x * args.scale)
                 result[out_y:out_y + part.shape[0], out_x:out_x + part.shape[1]] = part
             print(f"[PARTIAL IMAGE] {len(failed_tasks)} task region(s) highlighted magenta.")
         else:
-            result = np.empty(output_shape, dtype=np.uint8)
-            for (task_y, task_x), part in pieces.items():
-                out_y = round(task_y * args.scale)
-                out_x = round(task_x * args.scale)
-                result[out_y:out_y + part.shape[0], out_x:out_x + part.shape[1]] = part
+            result = stitch_tile_pieces(pieces, h, w, args.scale)
         stitching_seconds = time.perf_counter() - stitching_started
     elapsed = time.perf_counter() - started
-    path = Path(args.output) / f"{Path(args.input).stem}_{args.scale:.1f}x.png"
+    output_suffix = f"nlm_sw{args.nlm_search_window}" if args.operation == "nlm" else f"{args.scale:.1f}x"
+    path = Path(args.output) / f"{Path(args.input).stem}_{output_suffix}.png"
     save_image(path, result)
     status = "PARTIAL" if failed_tasks else "COMPLETE"
-    print(f"[MASTER] status={status} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
+    print(f"[MASTER] status={status} operation={args.operation} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
     throughput = h * w / elapsed if elapsed else 0.0
-    report = ["Distributed Image Upscaler - Benchmark Report", f"Master: {socket.gethostname()}", f"Input: {args.input}", f"Resolution: {w}x{h}", f"Scale: {args.scale}x", f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}", f"Output: {path}", f"Execution time: {elapsed:.6f}s", f"Throughput: {throughput:.3f} input-pixels/s"]
+    operation_report = (
+        f"NLM denoising (search window={args.nlm_search_window}, h=3, hColor=3, template=7)"
+        if args.operation == "nlm" else f"Upscale (factor={args.scale}x)"
+    )
+    report = ["Distributed Image Processing - Benchmark Report", f"Master: {socket.gethostname()}", f"Input: {args.input}", f"Resolution: {w}x{h}", f"Operation: {operation_report}", f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}", f"Output: {path}", f"Execution time: {elapsed:.6f}s", f"Throughput: {throughput:.3f} input-pixels/s"]
     parallelism = planned_worker_count if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
     speedup = baseline_seconds / elapsed if baseline_seconds is not None and elapsed else None
     efficiency = speedup / max(1, parallelism) * 100 if speedup is not None else None
-    analysis_rows = [("Execution mode", args.mode), ("Scheduler", args.scheduler), ("Worker nodes", str(planned_worker_count)), ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"), ("T_run", f"{elapsed:.3f}s"), ("Speedup", f"{speedup:.3f}x" if speedup is not None else "n/a"), ("Efficiency", f"{efficiency:.2f}% (P={parallelism})" if efficiency is not None else "n/a"), ("Throughput", f"{throughput:.2f} input-pixels/s")]
+    analysis_rows = [("Operation", operation_report), ("Execution mode", args.mode), ("Scheduler", args.scheduler), ("Worker nodes", str(planned_worker_count)), ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"), ("T_run", f"{elapsed:.3f}s"), ("Speedup", f"{speedup:.3f}x" if speedup is not None else "n/a"), ("Efficiency", f"{efficiency:.2f}% (P={parallelism})" if efficiency is not None else "n/a"), ("Throughput", f"{throughput:.2f} input-pixels/s")]
     print("\n[OVERALL ANALYSIS]")
     print(f"{'METRIC':<24} VALUE")
     report.extend(["", "OVERALL ANALYSIS", f"{'METRIC':<24} VALUE"])
@@ -652,6 +778,7 @@ def main() -> None:
             continue
         task_details.append({
             "id": task["id"],
+            "label": task["label"],
             "worker": task.get("assigned_worker", task.get("failed_on", "-")),
             "status": task.get("status", "FAILED"),
             "region": f"x={task['x']}..{task['x_end']-1},y={task['y']}..{task['y_end']-1}",
@@ -662,7 +789,7 @@ def main() -> None:
             "other": None,
             "total": None,
         })
-    task_header = f"{'TASK':<10} {'WORKER':<22} {'REGION':<27} {'STATUS':<30} {'TASK MB':>8} {'RESULT MB':>10} {'NETWORK':>10} {'NETWORK MB/S':>13} {'COMPUTE':>9} {'OTHER (TASK)':>12} {'TOTAL TIME':>11}"
+    task_header = f"{'TASK':<12} {'WORKER':<22} {'REGION':<27} {'STATUS':<30} {'TASK MB':>8} {'RESULT MB':>10} {'NETWORK':>10} {'NETWORK MB/S':>13} {'COMPUTE':>9} {'OTHER (TASK)':>12} {'TOTAL TIME':>11}"
     print("\n[TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP]"); print(task_header)
     report.extend(["", "TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP", task_header])
     for item in task_details:
@@ -682,14 +809,14 @@ def main() -> None:
             compute = f"{item['compute']:.3f}s"
             other = f"{item['other']:.3f}s"
             total = f"{item['total']:.3f}s"
-        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['region']:<27} {item['status']:<30} {input_mb:>7.2f} {result_mb:>9} {network:>10} {network_rate:>13} {compute:>9} {other:>12} {total:>11}"
+        row = f"{item['label']:<12} {item['worker'][:22]:<22} {item['region']:<27} {item['status']:<30} {input_mb:>7.2f} {result_mb:>9} {network:>10} {network_rate:>13} {compute:>9} {other:>12} {total:>11}"
         print(row); report.append(row)
     recovery_line = f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s"
     print("\n" + recovery_line); report.append(recovery_line)
     report.extend(failure_events)
     log_dir = Path("logs"); log_dir.mkdir(parents=True, exist_ok=True)
     safe_master = "".join(c if c.isalnum() or c in "-_" else "_" for c in socket.gethostname())
-    log_name = f"{safe_master}_{w}x{h}_{args.scale:.1f}x_{args.mode}_{args.scheduler}_{len(workers) if args.mode == 'distributed' else 0}workers_{time.strftime('%Y%m%d-%H%M%S')}.txt"
+    log_name = f"{safe_master}_{w}x{h}_{output_suffix}_{args.mode}_{args.scheduler}_{len(workers) if args.mode == 'distributed' else 0}workers_{time.strftime('%Y%m%d-%H%M%S')}.txt"
     log_path = log_dir / log_name
     log_path.write_text("\n".join(report) + "\n", encoding="utf-8")
     print(f"[LOG] benchmark report saved: {log_path}")

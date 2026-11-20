@@ -15,11 +15,14 @@ from image_pipeline import checksum, process_slice
 from protocol import recv_bytes, recv_json, send_bytes, send_json
 
 
-def _process(payload: bytes, shape: tuple[int, ...], scale: float) -> tuple[bytes, tuple[int, ...], str, float, tuple[float, float]]:
+def _process(
+    payload: bytes, shape: tuple[int, ...], scale: float,
+    operation: str, nlm_search_window: int,
+) -> tuple[bytes, tuple[int, ...], str, float, tuple[float, float]]:
     started = time.perf_counter()
     started_epoch = time.time()
     image = np.frombuffer(payload, dtype=np.uint8).reshape(shape).copy()
-    result = process_slice(image, scale)
+    result = process_slice(image, scale, operation, nlm_search_window)
     result_bytes = np.ascontiguousarray(result).tobytes()
     return result_bytes, result.shape, checksum(result), time.perf_counter() - started, (started_epoch, time.time())
 
@@ -31,7 +34,7 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
         try:
             request = recv_json(conn)
             if request.get("action") == "info":
-                send_json(conn, {"ok": True, "host": socket.gethostname(), "cores": multiprocessing.cpu_count(), "slots": multiprocessing.cpu_count()})
+                send_json(conn, {"ok": True, "host": socket.gethostname(), "cores": multiprocessing.cpu_count(), "slots": multiprocessing.cpu_count(), "operations": ["upscale", "nlm"]})
                 return
             if request.get("version") != PROTOCOL_VERSION:
                 raise ValueError("unsupported protocol version")
@@ -49,7 +52,12 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
                 raise ValueError("input checksum mismatch")
             started = time.perf_counter()
             started_epoch = time.time()
-            future = pool.submit(_process, payload, tuple(request["shape"]), float(request["scale"]))
+            operation = request.get("operation", "upscale")
+            nlm_search_window = int(request.get("nlm_search_window", 21))
+            future = pool.submit(
+                _process, payload, tuple(request["shape"]), float(request["scale"]),
+                operation, nlm_search_window,
+            )
             samples: list[tuple[float, float]] = []
             proc = psutil.Process()
             proc.cpu_percent(None)
@@ -92,7 +100,7 @@ def run(bind: str, port: int, processes: int) -> None:
                 try:
                     data, addr = udp.recvfrom(1024)
                     if data == b"DISCOVER_UPSCAYL_WORKERS_V1":
-                        info = {"host": socket.gethostname(), "port": port, "cores": processes, "protocol": PROTOCOL_VERSION}
+                        info = {"host": socket.gethostname(), "port": port, "cores": processes, "protocol": PROTOCOL_VERSION, "operations": ["upscale", "nlm"]}
                         udp.sendto(__import__("json").dumps(info).encode(), addr)
                 except OSError:
                     break
