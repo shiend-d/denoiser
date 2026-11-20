@@ -30,20 +30,24 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
     with conn:
         conn.settimeout(SOCKET_TIMEOUT)
         reserved = False
+        task_label = "?/?"
+        master_label = f"Master@{address[0]}"
         try:
             request = recv_json(conn)
             if request.get("action") == "info":
-                send_json(conn, {"ok": True, "host": socket.gethostname(), "cores": multiprocessing.cpu_count(), "slots": multiprocessing.cpu_count(), "operations": ["nlm"], "nlm_task_schema": 3})
+                send_json(conn, {"ok": True, "host": socket.gethostname(), "cores": multiprocessing.cpu_count(), "slots": multiprocessing.cpu_count(), "operations": ["nlm"], "nlm_task_schema": 4})
                 return
             if request.get("version") != PROTOCOL_VERSION:
                 raise ValueError("unsupported protocol version")
             if request.get("operation") != "nlm":
                 raise ValueError("unsupported or missing image operation; this Worker supports NLM only")
-            if request.get("nlm_task_schema") != 3:
+            if request.get("nlm_task_schema") != 4:
                 raise ValueError("incompatible NLM task schema; update the Master")
+            task_label = f"{request.get('task_number', '?')}/{request.get('task_count', '?')}"
+            master_label = f"{request.get('master_host', 'Master')}@{address[0]}"
             if not capacity.acquire(blocking=False):
                 send_json(conn, {"ok": False, "busy": True, "retry_after": 0.5, "error": "all worker process slots are busy"})
-                print(f"[WORKER][BUSY] rejected temporarily master={address[0]} task={request.get('task_id')}", flush=True)
+                print(f"[BUSY] task={task_label} master={master_label}", flush=True)
                 return
             reserved = True
             send_json(conn, {"ok": True, "accepted": True})
@@ -77,9 +81,9 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
             send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "compute_seconds": compute_seconds, "input_receive_seconds": input_receive_seconds, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
             send_bytes(conn, output)
             send_json(conn, {"complete": True})
-            print(f"[WORKER] task={request['task_id']} master={address[0]} input={len(payload)}B output={len(output)}B checksum={digest}", flush=True)
+            print(f"[TASK] {task_label} completed from {master_label}", flush=True)
         except Exception as exc:
-            print(f"[WORKER][ERROR] master={address[0]} error={type(exc).__name__}: {exc}", flush=True)
+            print(f"[ERROR] task={task_label} master={master_label} {type(exc).__name__}: {exc}", flush=True)
             try:
                 send_json(conn, {"ok": False, "error": str(exc)})
             except OSError:
@@ -100,7 +104,7 @@ def run(bind: str, port: int, processes: int) -> None:
                 try:
                     data, addr = udp.recvfrom(1024)
                     if data == b"DISCOVER_UPSCAYL_WORKERS_V1":
-                        info = {"host": socket.gethostname(), "port": port, "cores": processes, "protocol": PROTOCOL_VERSION, "operations": ["nlm"], "nlm_task_schema": 3}
+                        info = {"host": socket.gethostname(), "port": port, "cores": processes, "protocol": PROTOCOL_VERSION, "operations": ["nlm"], "nlm_task_schema": 4}
                         udp.sendto(__import__("json").dumps(info).encode(), addr)
                 except OSError:
                     break

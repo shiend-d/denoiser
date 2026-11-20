@@ -6,6 +6,9 @@ __pycache__/
 # Generated image outputs and local Nix build links
 input/*-before.png
 output/*
+!output/.gitkeep
+logs/*
+!logs/.gitkeep
 result
 result-*
 

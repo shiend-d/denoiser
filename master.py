@@ -161,7 +161,6 @@ def remote_task(
     nlm_h: float, nlm_h_color: float, timeout: float = SOCKET_TIMEOUT,
 ) -> tuple[dict, np.ndarray]:
     image = task["image"]
-    task_started = time.perf_counter()
     payload = np.ascontiguousarray(image).tobytes()
     # Fail quickly when a retry target is offline, while allowing large task
     # payloads/results enough time to cross a congested LAN link.
@@ -169,7 +168,9 @@ def remote_task(
         sock.settimeout(timeout)
         send_json(sock, {
             "version": PROTOCOL_VERSION, "task_id": task["id"],
-            "shape": list(image.shape), "operation": "nlm", "nlm_task_schema": 3,
+            "task_number": task["number"], "task_count": task["count"],
+            "master_host": socket.gethostname(),
+            "shape": list(image.shape), "operation": "nlm", "nlm_task_schema": 4,
             "nlm_search_window": nlm_search_window,
             "nlm_h": nlm_h, "nlm_h_color": nlm_h_color,
             "checksum": checksum(image),
@@ -199,7 +200,7 @@ def remote_task(
     if checksum(result) != response["checksum"]:
         raise ValueError("result checksum mismatch")
     compute_seconds = float(response.get("compute_seconds", 0.0))
-    response["transport"] = {"upload_interval": upload_interval, "download_interval": download_interval, "compute_interval": (max(upload_interval[1], response_received_at - compute_seconds), response_received_at), "task_interval": (upload_interval[0], download_interval[1]), "total": time.perf_counter() - task_started}
+    response["transport"] = {"upload_interval": upload_interval, "download_interval": download_interval, "compute_interval": (max(upload_interval[1], response_received_at - compute_seconds), response_received_at), "task_interval": (upload_interval[0], download_interval[1])}
     return response, result
 
 
@@ -238,6 +239,7 @@ def make_tile_tasks(image: np.ndarray, tile_size: int, overlap: int) -> tuple[li
             tasks.append({
                 "id": uuid.uuid4().hex,
                 "label": f"{len(tasks) + 1}/{count}",
+                "number": len(tasks) + 1, "count": count,
                 "x": x, "x_end": x_end,
                 "y": y, "y_end": y_end,
                 "context_x0": context_x0, "context_y0": context_y0,
@@ -334,7 +336,7 @@ def main() -> None:
                 except ValueError:
                     pass
                 print("Enter an odd integer of at least 7.")
-        print("\nChoose execution mode:\n  1) Sequential baseline: one process on Master\n  2) Local parallel: multiple processes on Master\n  3) Distributed: selected Workers process image tiles concurrently")
+        print("\nChoose execution mode:\n  1) Sequential\n  2) Local parallel\n  3) Distributed")
         modes = {"1": "sequential", "2": "local-parallel", "3": "distributed"}
         while args.mode not in modes.values(): args.mode = modes.get(input("Mode [1-3]: ").strip())
         if args.mode == "distributed":
@@ -357,7 +359,7 @@ def main() -> None:
                     except ValueError: print("Invalid selection; using all discovered Workers.")
             args.worker = [f"{w['ip']}:{w['port']}" for w in found]
             workers = found
-            print("Scheduler:\n  1) Dynamic: give the next task to whichever Worker slot finishes first\n  2) Static: preassign tasks to process slots; more slots means more assigned tasks")
+            print("Scheduler:\n  1) Dynamic\n  2) Static")
             args.scheduler = "static" if input("Scheduler [1-2, default 1]: ").strip() == "2" else "dynamic"
             args.fault_tolerance = input("Enable fault tolerance? [y/N]: ").strip().lower() in ("y", "yes")
         print()
@@ -384,7 +386,7 @@ def main() -> None:
         all_workers = list(workers)
         unsupported = [
             w for w in workers
-            if "nlm" not in w.get("operations", []) or w.get("nlm_task_schema") != 3
+            if "nlm" not in w.get("operations", []) or w.get("nlm_task_schema") != 4
         ]
         if unsupported:
             names = ", ".join(f"{w['host']}@{w['ip']}" for w in unsupported)
@@ -413,7 +415,7 @@ def main() -> None:
     print(f"[MASTER] NLM search_window={args.nlm_search_window} mode={args.mode}")
     baseline_seconds = None
     if args.mode != "sequential":
-        print("[BENCHMARK] Measuring single-process baseline using the same image tiles...")
+        print("[BENCHMARK] Measuring single-process baseline...")
         baseline_started = time.perf_counter()
         sequential_result, baseline_columns, baseline_rows = process_tiles_sequential(
             image, args.tile_size, tile_overlap, args.nlm_search_window,
@@ -492,25 +494,31 @@ def main() -> None:
                         slots.append(worker_node)
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(slots)) as pool:
                 active = {}
-                def submit(worker, task):
+                static_queues: list[list[dict]] = []
+                def submit(worker, task, slot_index=None):
                     task.setdefault("assigned_worker", worker["host"])
                     task.setdefault("assigned_worker_ip", worker["ip"])
                     active[pool.submit(
                         remote_task, worker, task, args.nlm_search_window, args.nlm_h, args.nlm_h_color
-                    )] = (worker, task)
+                    )] = (worker, task, slot_index)
                 if args.scheduler == "static":
                     assignments = [[] for _ in slots]
                     for index, task in enumerate(pending_tasks): assignments[index % len(slots)].append(task)
                     pending_tasks.clear()
-                    for worker, group in zip(slots, assignments):
-                        for task in group: submit(worker, task)
+                    static_queues = assignments
+                    # A static assignment fixes each task to a Worker slot,
+                    # but only one in-flight task is allowed per slot. Further
+                    # tasks on that slot wait until its current task returns.
+                    for slot_index, group in enumerate(static_queues):
+                        if group:
+                            submit(slots[slot_index], group.pop(0), slot_index)
                 else:
                     for worker in slots:
                         if pending_tasks: submit(worker, pending_tasks.pop(0))
                 while active:
                     done, _ = concurrent.futures.wait(active, return_when=concurrent.futures.FIRST_COMPLETED)
                     for future in done:
-                        worker, task = active.pop(future)
+                        worker, task, slot_index = active.pop(future)
                         retried = False
                         lost = False
                         first_error = None
@@ -532,8 +540,9 @@ def main() -> None:
                             failure_line = f"[{event}] task={task['label']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}"
                             print(failure_line); failure_events.append(failure_line)
                             if not args.fault_tolerance:
-                                workers = [w for w in workers if w["ip"] != failed_worker["ip"]]
-                                slots = [w for w in slots if w["ip"] != failed_worker["ip"]]
+                                if args.scheduler == "dynamic":
+                                    workers = [w for w in workers if w["ip"] != failed_worker["ip"]]
+                                    slots = [w for w in slots if w["ip"] != failed_worker["ip"]]
                                 task["status"] = "FAILED"
                                 failed_tasks.append(task); lost = True
                                 print(f"[PARTIAL] task={task['label']} marked missing; its output region will be highlighted")
@@ -610,12 +619,14 @@ def main() -> None:
                                 task_status = "SUCCESS"
                             task["status"] = task_status
                             region = f"x={task['x']}..{task['x_end']-1},y={task['y']}..{task['y_end']-1}"
-                            detail = {"id": task["id"], "label": task["label"], "worker": task.get("assigned_worker", worker["host"]), "status": task_status, "region": region, "total": transport.get("total", 0)}
+                            detail = {"id": task["id"], "label": task["label"], "worker": task.get("assigned_worker", worker["host"]), "status": task_status, "region": region}
                             detail["network_intervals"] = task_network_intervals
                             detail["compute"] = task_compute
                             task_details.append(detail)
-                            print(f"[TASK] {task['label']} -> {worker['host']} elapsed={detail['total']:.3f}s")
+                            print(f"[TASK] {task['label']} -> {worker['host']}")
                             pieces[(task["y"], task["x"])] = crop_tile_core(part, task)
+                        if args.scheduler == "static" and slot_index is not None and static_queues[slot_index]:
+                            submit(slots[slot_index], static_queues[slot_index].pop(0), slot_index)
                         if args.scheduler == "dynamic" and pending_tasks and slots:
                             submit(worker if worker in slots else slots[0], pending_tasks.pop(0))
                 if pending_tasks:
@@ -743,14 +754,13 @@ def main() -> None:
             "region": f"x={task['x']}..{task['x_end']-1},y={task['y']}..{task['y_end']-1}",
             "network": None,
             "compute": None,
-            "total": None,
         })
-    task_header = f"{'TASK':<12} {'WORKER':<22} {'REGION':<27} {'STATUS':<30} {'NETWORK':>10} {'COMPUTE':>9} {'TOTAL TIME':>11}"
+    task_header = f"{'TASK':<12} {'WORKER':<22} {'REGION':<27} {'STATUS':<30} {'NETWORK':>10} {'COMPUTE':>9}"
     print("\n[TASK TIME]"); print(task_header)
     report.extend(["", "TASK TIME", task_header])
     for item in task_details:
-        if item["total"] is None:
-            network = compute = total = "-"
+        if item.get("compute") is None:
+            network = compute = "-"
         else:
             # Keep task Network on the same basis as the global T_RUN row:
             # any concurrent Worker compute interval is excluded.
@@ -759,8 +769,7 @@ def main() -> None:
             )
             network = f"{item['network']:.3f}s"
             compute = f"{item['compute']:.3f}s"
-            total = f"{item['total']:.3f}s"
-        row = f"{item['label']:<12} {item['worker'][:22]:<22} {item['region']:<27} {item['status']:<30} {network:>10} {compute:>9} {total:>11}"
+        row = f"{item['label']:<12} {item['worker'][:22]:<22} {item['region']:<27} {item['status']:<30} {network:>10} {compute:>9}"
         print(row); report.append(row)
     recovery_line = f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s"
     print("\n" + recovery_line); report.append(recovery_line)
