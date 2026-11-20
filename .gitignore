@@ -13,4 +13,4 @@ result
 result-*
 
 # Assignment source material and large unrelated report files
-/konteks/
+/konteks/*

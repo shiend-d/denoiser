@@ -26,7 +26,7 @@ def _process(
     return result_bytes, result.shape, checksum(result), time.perf_counter() - started
 
 
-def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futures.ProcessPoolExecutor, capacity: threading.BoundedSemaphore) -> None:
+def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futures.ProcessPoolExecutor, capacity: threading.BoundedSemaphore, processes: int) -> None:
     with conn:
         conn.settimeout(SOCKET_TIMEOUT)
         reserved = False
@@ -35,7 +35,7 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
         try:
             request = recv_json(conn)
             if request.get("action") == "info":
-                send_json(conn, {"ok": True, "host": socket.gethostname(), "cores": multiprocessing.cpu_count(), "slots": multiprocessing.cpu_count(), "operations": ["nlm"], "nlm_task_schema": 4})
+                send_json(conn, {"ok": True, "host": socket.gethostname(), "cores": multiprocessing.cpu_count(), "slots": processes, "operations": ["nlm"], "nlm_task_schema": 4})
                 return
             if request.get("version") != PROTOCOL_VERSION:
                 raise ValueError("unsupported protocol version")
@@ -67,15 +67,36 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
             samples: list[tuple[float, float]] = []
             proc = psutil.Process()
             proc.cpu_percent(None)
+            for child in proc.children(recursive=True):
+                try:
+                    child.cpu_percent(None)
+                except psutil.Error:
+                    pass
             while not future.done():
-                time.sleep(0.25)
+                time.sleep(0.1)
                 children = proc.children(recursive=True)
-                cpu = proc.cpu_percent(None) + sum(child.cpu_percent(None) for child in children if child.is_running())
+                cpu = proc.cpu_percent(None)
+                for child in children:
+                    try:
+                        if child.is_running():
+                            cpu += child.cpu_percent(None)
+                    except psutil.Error:
+                        continue
+                cpu /= max(1, multiprocessing.cpu_count())
                 samples.append((cpu, psutil.virtual_memory().percent))
                 if time.perf_counter() - started > SOCKET_TIMEOUT:
                     future.cancel()
                     raise TimeoutError("worker computation timed out")
             output, shape, digest, compute_seconds = future.result()
+            children = proc.children(recursive=True)
+            cpu = proc.cpu_percent(None)
+            for child in children:
+                try:
+                    if child.is_running():
+                        cpu += child.cpu_percent(None)
+                except psutil.Error:
+                    continue
+            samples.append((cpu / max(1, multiprocessing.cpu_count()), psutil.virtual_memory().percent))
             avg_cpu = sum(x[0] for x in samples) / len(samples) if samples else 0.0
             avg_mem = sum(x[1] for x in samples) / len(samples) if samples else psutil.virtual_memory().percent
             send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "compute_seconds": compute_seconds, "input_receive_seconds": input_receive_seconds, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
@@ -104,7 +125,7 @@ def run(bind: str, port: int, processes: int) -> None:
                 try:
                     data, addr = udp.recvfrom(1024)
                     if data == b"DISCOVER_UPSCAYL_WORKERS_V1":
-                        info = {"host": socket.gethostname(), "port": port, "cores": processes, "protocol": PROTOCOL_VERSION, "operations": ["nlm"], "nlm_task_schema": 4}
+                        info = {"host": socket.gethostname(), "port": port, "cores": multiprocessing.cpu_count(), "slots": processes, "protocol": PROTOCOL_VERSION, "operations": ["nlm"], "nlm_task_schema": 4}
                         udp.sendto(__import__("json").dumps(info).encode(), addr)
                 except OSError:
                     break
@@ -117,7 +138,7 @@ def run(bind: str, port: int, processes: int) -> None:
             print(f"[WORKER] {socket.gethostname()} listening {bind}:{port}, processes={processes}", flush=True)
             while True:
                 conn, addr = server.accept()
-                threading.Thread(target=handle, args=(conn, addr, pool, capacity), daemon=True).start()
+                threading.Thread(target=handle, args=(conn, addr, pool, capacity, processes), daemon=True).start()
 
 
 def main() -> None:

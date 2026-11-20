@@ -7,6 +7,7 @@ import json
 import math
 import multiprocessing
 import socket
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -25,6 +26,53 @@ from protocol import recv_bytes, recv_json, send_bytes, send_json
 
 class WorkerBusyError(RuntimeError):
     """Worker explicitly rejected a task because all of its slots are occupied."""
+
+
+class ProcessResourceMonitor:
+    """Sample CPU and system memory while local image processing is running."""
+
+    def __init__(self, interval: float = 0.05) -> None:
+        self.process = psutil.Process()
+        self.interval = interval
+        self.cpu_samples: list[float] = []
+        self.memory_samples: list[float] = []
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _sample(self) -> None:
+        processes = [self.process]
+        try:
+            processes.extend(self.process.children(recursive=True))
+        except psutil.Error:
+            pass
+        cpu_total = 0.0
+        for process in processes:
+            try:
+                cpu_total += process.cpu_percent(None)
+            except psutil.Error:
+                continue
+        self.cpu_samples.append(cpu_total / max(1, multiprocessing.cpu_count()))
+        self.memory_samples.append(psutil.virtual_memory().percent)
+
+    def start(self) -> None:
+        self.process.cpu_percent(None)  # prime psutil's CPU counters
+        try:
+            for child in self.process.children(recursive=True):
+                child.cpu_percent(None)
+        except psutil.Error:
+            pass
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self.stop_event.wait(self.interval):
+            self._sample()
+
+    def stop(self) -> tuple[float, float]:
+        self.stop_event.set()
+        self.thread.join()
+        cpu = sum(self.cpu_samples) / len(self.cpu_samples) if self.cpu_samples else 0.0
+        memory = sum(self.memory_samples) / len(self.memory_samples) if self.memory_samples else psutil.virtual_memory().percent
+        return cpu, memory
 
 
 def interval_union_seconds(intervals: list[tuple[float, float]]) -> float:
@@ -414,14 +462,18 @@ def main() -> None:
     )
     print(f"[MASTER] NLM search_window={args.nlm_search_window} mode={args.mode}")
     baseline_seconds = None
+    baseline_resource_usage = None
     if args.mode != "sequential":
         print("[BENCHMARK] Measuring single-process baseline...")
+        baseline_monitor = ProcessResourceMonitor()
+        baseline_monitor.start()
         baseline_started = time.perf_counter()
         sequential_result, baseline_columns, baseline_rows = process_tiles_sequential(
             image, args.tile_size, tile_overlap, args.nlm_search_window,
             args.nlm_h, args.nlm_h_color,
         )
         baseline_seconds = time.perf_counter() - baseline_started
+        baseline_resource_usage = baseline_monitor.stop()
         print(
             f"[BENCHMARK] sequential={baseline_seconds:.3f}s "
             f"grid={baseline_columns}x{baseline_rows} tasks={baseline_columns * baseline_rows} "
@@ -434,9 +486,14 @@ def main() -> None:
     failed_tasks: list[dict] = []
     tile_columns = tile_rows = task_count = 0
     started = time.perf_counter()
+    local_resource_monitor = None
+    if args.mode != "distributed":
+        local_resource_monitor = ProcessResourceMonitor()
+        local_resource_monitor.start()
     task_preparation_seconds = 0.0
     parallel_wall_seconds = 0.0
     stitching_seconds = 0.0
+    processing_interval = (started, started)
     if args.mode == "sequential":
         preparation_started = time.perf_counter()
         tasks, tile_columns, tile_rows = make_tile_tasks(image, args.tile_size, tile_overlap)
@@ -449,11 +506,14 @@ def main() -> None:
             f"context={tile_overlap}px process_slots=1"
         )
         pieces = {}
+        processing_started = time.perf_counter()
         for task in tasks:
             processed = process_slice(
                 task["image"], args.nlm_search_window, args.nlm_h, args.nlm_h_color
             )
             pieces[(task["y"], task["x"])] = crop_tile_core(processed, task)
+        processing_interval = (processing_started, time.perf_counter())
+        parallel_wall_seconds = processing_interval[1] - processing_interval[0]
         result = stitch_tile_pieces(pieces, h, w)
     else:
         preparation_started = time.perf_counter()
@@ -470,7 +530,7 @@ def main() -> None:
         pieces: dict[tuple[int, int], np.ndarray] = {}
         parallel_started = time.perf_counter()
         if args.mode == "local-parallel":
-            with concurrent.futures.ProcessPoolExecutor() as pool:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=process_slots) as pool:
                 futures = {
                     pool.submit(
                         local_piece,
@@ -480,7 +540,7 @@ def main() -> None:
                 for f, t in futures.items():
                     pieces[(t["y"], t["x"])] = crop_tile_core(f.result(), t)
         else:
-            print("[MASTER] workers=" + ", ".join(f"{w['host']}@{w['ip']}({w.get('cores', 1)} processes)" for w in workers))
+            print("[MASTER] workers=" + ", ".join(f"{w['host']}@{w['ip']}({w.get('slots', w.get('cores', 1))} processes)" for w in workers))
             pending_tasks = list(tasks)
             # Give every distinct Worker one initial task before assigning its
             # additional local process slots. This prevents the first node in
@@ -638,6 +698,7 @@ def main() -> None:
                     print(f"[PARTIAL] {len(pending_tasks)} pending task(s) have no available Worker and will be highlighted")
                     pending_tasks.clear()
         parallel_wall_seconds = time.perf_counter() - parallel_started
+        processing_interval = (parallel_started, parallel_started + parallel_wall_seconds)
         stitching_started = time.perf_counter()
         if failed_tasks:
             result = np.full((h, w, 3), (255, 0, 255), dtype=np.uint8)
@@ -648,6 +709,9 @@ def main() -> None:
             result = stitch_tile_pieces(pieces, h, w)
         stitching_seconds = time.perf_counter() - stitching_started
     elapsed = time.perf_counter() - started
+    local_resource_usage = None
+    if local_resource_monitor is not None:
+        local_resource_usage = local_resource_monitor.stop()
     # In sequential mode this run is the baseline itself. Show its measured
     # duration and the expected 1x / 100% single-process reference values.
     if args.mode == "sequential":
@@ -670,11 +734,7 @@ def main() -> None:
         f"Output: {path}", f"Execution time: {elapsed:.6f}s",
         f"Throughput: {throughput:.3f} input-pixels/s",
     ]
-    parallelism = (
-        1 if args.mode == "sequential"
-        else planned_worker_count if args.mode == "distributed"
-        else (multiprocessing.cpu_count() or 1)
-    )
+    parallelism = process_slots
     speedup = baseline_seconds / elapsed if baseline_seconds is not None and elapsed else None
     efficiency = speedup / max(1, parallelism) * 100 if speedup is not None else None
     analysis_rows = [
@@ -686,6 +746,7 @@ def main() -> None:
         ("Scheduler", args.scheduler),
         ("Fault tolerance", "Y" if args.fault_tolerance else "N" if args.fault_tolerance is not None else "n/a"),
         ("Worker nodes", str(planned_worker_count)),
+        ("Process slots P", str(parallelism)),
         ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"),
         ("T_run", f"{elapsed:.3f}s"),
         ("Speedup", f"{speedup:.3f}x" if speedup is not None else "n/a"),
@@ -698,7 +759,7 @@ def main() -> None:
     for label, value in analysis_rows:
         line = f"{label:<24} {value}"
         print(line); report.append(line)
-    if args.mode != "sequential":
+    if args.mode == "distributed":
         all_network_intervals = [interval for stat in worker_stats.values() for interval in (stat["master_upload_intervals"] + stat["master_download_intervals"])]
         all_compute_intervals = [interval for stat in worker_stats.values() for interval in stat["master_compute_intervals"]]
         run_window = [(parallel_started, parallel_started + parallel_wall_seconds)]
@@ -708,21 +769,45 @@ def main() -> None:
         # Count network/compute overlap as compute time, not network time.
         run_network = subtract_intervals(run_network, run_compute)
         all_network = interval_union_seconds(run_network)
-        # Other is the unmeasured remainder, including preparation/stitching.
-        run_other = max(0.0, elapsed - all_network - all_compute)
-        phase_rows = [
-            ("Network (all Workers)", all_network),
-            ("Pure compute (all Workers)", all_compute),
-            ("Other (whole job)", run_other),
-            ("T_run total", elapsed),
-        ]
-        print("\n[RUN TIME OVERALL]")
-        phase_header = f"{'PHASE':<30} {'WALL TIME':>12}"
-        print(phase_header)
-        report.extend(["", "RUN TIME OVERALL", phase_header])
-        for phase, seconds in phase_rows:
-            line = f"{phase:<30} {seconds:>11.3f}s"
-            print(line); report.append(line)
+        processing_label = "Pure compute (all Workers)"
+    else:
+        run_window = [(started, started + elapsed)]
+        run_compute = clip_intervals([processing_interval], run_window)
+        all_compute = interval_union_seconds(run_compute)
+        all_network = 0.0
+        processing_label = "Sequential processing" if args.mode == "sequential" else "Local parallel processing"
+    # Residual wall time includes task preparation, stitching, and runtime overhead.
+    run_other = max(0.0, elapsed - all_network - all_compute)
+    phase_rows = [
+        ("Network (all Workers)" if args.mode == "distributed" else "Network", all_network),
+        (processing_label, all_compute),
+        ("Other (whole job)", run_other),
+        ("T_run total", elapsed),
+    ]
+    print("\n[RUN TIME OVERALL]")
+    phase_header = f"{'PHASE':<30} {'WALL TIME':>12}"
+    print(phase_header)
+    report.extend(["", "RUN TIME OVERALL", phase_header])
+    for phase, seconds in phase_rows:
+        line = f"{phase:<30} {seconds:>11.3f}s"
+        print(line); report.append(line)
+    master_rows = []
+    if args.mode == "sequential":
+        cpu, memory = local_resource_usage or (0.0, psutil.virtual_memory().percent)
+        master_rows.append(("localhost-seq", task_count, elapsed, cpu, memory))
+    else:
+        cpu, memory = baseline_resource_usage or (0.0, psutil.virtual_memory().percent)
+        master_rows.append(("localhost-seq", baseline_columns * baseline_rows, baseline_seconds, cpu, memory))
+        if args.mode == "local-parallel":
+            cpu, memory = local_resource_usage or (0.0, psutil.virtual_memory().percent)
+            master_rows.append(("localhost-multi", task_count, elapsed, cpu, memory))
+    master_header = f"{'HOST':<22} {'TASKS':>7} {'T_RUN':>10} {'AVG CPU':>9} {'AVG RAM':>9}"
+    print("\n[MASTER TIME]")
+    print(master_header)
+    report.extend(["", "MASTER TIME", master_header])
+    for host, tasks_done, run_seconds, avg_cpu, avg_ram in master_rows:
+        row = f"{host:<22} {tasks_done:>7} {run_seconds:>9.3f}s {avg_cpu:>8.1f}% {avg_ram:>8.1f}%"
+        print(row); report.append(row)
     if worker_stats:
         header = f"{'WORKER':<22} {'TASKS':>5} {'FAILED':>6} {'NETWORK':>10} {'COMPUTE':>9} {'AVG CPU':>9} {'AVG RAM':>9} {'RETRY':>6}"
         print("\n[WORKER TIME]")
