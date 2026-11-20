@@ -27,13 +27,6 @@ class WorkerBusyError(RuntimeError):
     """Worker explicitly rejected a task because all of its slots are occupied."""
 
 
-def noise_sigma_arg(value: str) -> float:
-    sigma = float(value)
-    if not 0 < sigma <= 100:
-        raise argparse.ArgumentTypeError("noise sigma must be greater than 0 and at most 100")
-    return sigma
-
-
 def interval_union_seconds(intervals: list[tuple[float, float]]) -> float:
     """Elapsed wall time covered by intervals, counting overlaps only once."""
     ordered = sorted((start, end) for start, end in intervals if end >= start)
@@ -169,17 +162,14 @@ def remote_task(
 ) -> tuple[dict, np.ndarray]:
     image = task["image"]
     task_started = time.perf_counter()
-    connect_started = time.perf_counter()
-    connect_seconds = upload_seconds = 0.0
     payload = np.ascontiguousarray(image).tobytes()
     # Fail quickly when a retry target is offline, while allowing large task
     # payloads/results enough time to cross a congested LAN link.
     with socket.create_connection((worker["ip"], worker["port"]), timeout=min(timeout, 10.0)) as sock:
-        connect_seconds = time.perf_counter() - connect_started
         sock.settimeout(timeout)
         send_json(sock, {
             "version": PROTOCOL_VERSION, "task_id": task["id"],
-            "shape": list(image.shape), "operation": "nlm", "nlm_task_schema": 2,
+            "shape": list(image.shape), "operation": "nlm", "nlm_task_schema": 3,
             "nlm_search_window": nlm_search_window,
             "nlm_h": nlm_h, "nlm_h_color": nlm_h_color,
             "checksum": checksum(image),
@@ -192,46 +182,33 @@ def remote_task(
         upload_started = time.perf_counter()
         send_bytes(sock, payload)
         local_send_seconds = time.perf_counter() - upload_started
-        response_started = time.perf_counter()
         response = recv_json(sock)
         response_received_at = time.perf_counter()
         if not response.get("ok"):
             raise RuntimeError(response.get("error", "worker failed"))
         # Measure upload at its receiver. sendall() only measures when local
         # TCP buffers accept bytes, which can be much shorter than delivery.
-        input_interval = response.get("input_receive_interval", (0.0, 0.0))
         reported_upload = response.get("input_receive_seconds")
-        if reported_upload is None and len(input_interval) == 2 and input_interval[1] > input_interval[0]:
-            reported_upload = input_interval[1] - input_interval[0]
         upload_seconds = float(reported_upload if reported_upload is not None else local_send_seconds)
         upload_interval = (upload_started, upload_started + upload_seconds)
-        response_wait_seconds = response_received_at - response_started
         download_started = time.perf_counter()
         raw = recv_bytes(sock)
-        download_seconds = time.perf_counter() - download_started
         download_interval = (download_started, time.perf_counter())
-        phase_intervals = recv_json(sock)
+        recv_json(sock)  # drain the Worker's completion frame
     result = np.frombuffer(raw, dtype=np.uint8).reshape(response["shape"]).copy()
     if checksum(result) != response["checksum"]:
         raise ValueError("result checksum mismatch")
     compute_seconds = float(response.get("compute_seconds", 0.0))
-    response["transport"] = {"connect": connect_seconds, "upload": upload_seconds, "upload_interval": upload_interval, "busy_wait": 0.0, "worker_wait": response_wait_seconds, "download": download_seconds, "download_interval": download_interval, "compute_interval": (max(upload_interval[1], response_received_at - compute_seconds), response_received_at), "task_interval": (upload_interval[0], download_interval[1]), "total": time.perf_counter() - task_started, "sent_bytes": len(payload), "received_bytes": len(raw)}
-    response["phase_intervals"] = phase_intervals
+    response["transport"] = {"upload_interval": upload_interval, "download_interval": download_interval, "compute_interval": (max(upload_interval[1], response_received_at - compute_seconds), response_received_at), "task_interval": (upload_interval[0], download_interval[1]), "total": time.perf_counter() - task_started}
     return response, result
 
 
 def empty_worker_stats(host: str) -> dict:
     return {
-        "host": host, "tasks": 0, "failed": 0, "compute": 0.0,
-        "task_total": 0.0, "other": 0.0, "worker_elapsed": 0.0,
-        "cpu": [], "memory": [], "bytes": 0, "retries": 0,
-        "connect": 0.0, "upload": 0.0, "busy_wait": 0.0,
-        "worker_wait": 0.0, "download": 0.0,
-        "network_bytes_in": 0, "network_bytes_out": 0,
-        "compute_intervals": [], "upload_intervals": [],
-        "download_intervals": [], "active_intervals": [],
+        "host": host, "tasks": 0, "failed": 0, "retries": 0,
+        "cpu": [], "memory": [],
         "master_upload_intervals": [], "master_download_intervals": [],
-        "master_compute_intervals": [], "master_active_intervals": [],
+        "master_compute_intervals": [],
     }
 
 
@@ -307,11 +284,7 @@ def process_tiles_sequential(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Distributed NLM image denoising coordinator")
     parser.add_argument("--input")
-    parser.add_argument("--noise-sigma", type=noise_sigma_arg, default=None, help="Gaussian noise standard deviation; default 20")
-    parser.add_argument("--noise-seed", type=int, default=DEFAULT_NOISE_SEED, help="fixed seed for repeatable noisy input")
     parser.add_argument("--nlm-search-window", type=int, default=None, help="odd NLM search window; larger values take longer")
-    parser.add_argument("--nlm-h", type=float, default=DEFAULT_NLM_H, help="NLM luminance denoising strength")
-    parser.add_argument("--nlm-h-color", type=float, default=DEFAULT_NLM_H_COLOR, help="NLM color denoising strength")
     parser.add_argument("--mode", choices=("sequential", "local-parallel", "distributed"))
     parser.add_argument("--worker", action="append", default=[], metavar="HOST[:PORT]")
     parser.add_argument("--workers", type=int, help="limit discovered workers")
@@ -324,10 +297,11 @@ def main() -> None:
         parser.error("--tile-size must be at least 1")
     if args.nlm_search_window is not None and (args.nlm_search_window < 7 or args.nlm_search_window % 2 == 0):
         parser.error("--nlm-search-window must be an odd integer of at least 7")
-    if not math.isfinite(args.nlm_h) or not math.isfinite(args.nlm_h_color) or args.nlm_h <= 0 or args.nlm_h_color <= 0:
-        parser.error("--nlm-h and --nlm-h-color must be finite and greater than 0")
-    if args.noise_seed < 0:
-        parser.error("--noise-seed must be 0 or greater")
+    # Keep synthetic input and filter strength consistent across benchmark modes.
+    args.noise_sigma = DEFAULT_NOISE_SIGMA
+    args.noise_seed = DEFAULT_NOISE_SEED
+    args.nlm_h = DEFAULT_NLM_H
+    args.nlm_h_color = DEFAULT_NLM_H_COLOR
     workers: list[dict] = []
     planned_worker_count = 0
     # No-argument launch is the guided terminal interface used for demos.
@@ -346,15 +320,6 @@ def main() -> None:
             print("File not found. Enter a valid path or a filename located in input/.")
         if Path(args.input).stem.endswith("-before"):
             parser.error("choose the original image in input/, not a generated -before image")
-        while args.noise_sigma is None:
-            entered = input(f"Gaussian noise sigma [default {DEFAULT_NOISE_SIGMA}; larger means more visible noise]: ").strip()
-            if not entered:
-                args.noise_sigma = DEFAULT_NOISE_SIGMA
-                break
-            try:
-                args.noise_sigma = noise_sigma_arg(entered)
-            except (ValueError, argparse.ArgumentTypeError) as exc:
-                print(f"Invalid noise level: {exc}")
         if args.nlm_search_window is None:
             while True:
                 entered = input(f"NLM search window [default {DEFAULT_NLM_SEARCH_WINDOW}, odd >= 7]: ").strip()
@@ -395,10 +360,7 @@ def main() -> None:
             print("Scheduler:\n  1) Dynamic: give the next task to whichever Worker slot finishes first\n  2) Static: preassign tasks to process slots; more slots means more assigned tasks")
             args.scheduler = "static" if input("Scheduler [1-2, default 1]: ").strip() == "2" else "dynamic"
             args.fault_tolerance = input("Enable fault tolerance? [y/N]: ").strip().lower() in ("y", "yes")
-            print("[FAULT TOLERANCE] Y: failed tasks retry on another Worker, with waits for busy slots. N: no retry; processing continues and missing regions are saved in magenta.")
         print()
-    if args.noise_sigma is None:
-        args.noise_sigma = DEFAULT_NOISE_SIGMA
     if args.nlm_search_window is None:
         args.nlm_search_window = DEFAULT_NLM_SEARCH_WINDOW
     tile_overlap = max(DEFAULT_OVERLAP, args.nlm_search_window // 2 + 7 // 2)
@@ -422,7 +384,7 @@ def main() -> None:
         all_workers = list(workers)
         unsupported = [
             w for w in workers
-            if "nlm" not in w.get("operations", []) or w.get("nlm_task_schema") != 2
+            if "nlm" not in w.get("operations", []) or w.get("nlm_task_schema") != 3
         ]
         if unsupported:
             names = ", ".join(f"{w['host']}@{w['ip']}" for w in unsupported)
@@ -446,10 +408,9 @@ def main() -> None:
     h, w, _ = image.shape
     print(
         f"[INPUT] original={original_path} noisy={before_path} {w}x{h} "
-        f"sigma={args.noise_sigma:g} seed={args.noise_seed} "
         f"noise_prep={noise_preparation_seconds:.3f}s"
     )
-    print(f"[MASTER] NLM search_window={args.nlm_search_window} h={args.nlm_h:g} hColor={args.nlm_h_color:g} mode={args.mode}")
+    print(f"[MASTER] NLM search_window={args.nlm_search_window} mode={args.mode}")
     baseline_seconds = None
     if args.mode != "sequential":
         print("[BENCHMARK] Measuring single-process baseline using the same image tiles...")
@@ -529,7 +490,6 @@ def main() -> None:
                     worker_capacity = max(1, int(worker_node.get("slots", worker_node.get("cores", 1))))
                     if slot_index < worker_capacity:
                         slots.append(worker_node)
-            completed = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(slots)) as pool:
                 active = {}
                 def submit(worker, task):
@@ -630,16 +590,8 @@ def main() -> None:
                                 task_window,
                             )
                             task_compute = interval_union_seconds(task_compute_intervals)
-                            task_network = interval_union_seconds(
-                                subtract_intervals(task_network_intervals, task_compute_intervals)
-                            )
-                            task_total = float(transport.get("total", 0.0))
-                            task_other = max(0.0, task_total - task_network - task_compute)
                             stats = worker_stats.setdefault(worker["ip"], empty_worker_stats(worker["host"]))
                             stats["tasks"] += 1
-                            stats["compute"] += float(response.get("compute_seconds", 0.0))
-                            stats["worker_elapsed"] += float(response.get("worker_elapsed", 0.0))
-                            phase_intervals = response.get("phase_intervals", {})
                             stats["master_upload_intervals"].extend(clip_intervals(
                                 [tuple(transport.get("upload_interval", (0, 0)))], task_window
                             ))
@@ -647,17 +599,8 @@ def main() -> None:
                                 [tuple(transport.get("download_interval", (0, 0)))], task_window
                             ))
                             stats["master_compute_intervals"].extend(task_compute_intervals)
-                            stats["master_active_intervals"].extend(task_window)
-                            stats["active_intervals"].append(tuple(phase_intervals.get("worker_interval", (0, 0))))
-                            stats["task_total"] += float(transport.get("total", 0.0))
-                            stats["other"] += task_other
-                            for key in ("connect", "upload", "busy_wait", "worker_wait", "download"):
-                                stats[key] += float(transport.get(key, 0.0))
-                            stats["network_bytes_in"] += int(transport.get("sent_bytes", task["image"].nbytes))
-                            stats["network_bytes_out"] += int(transport.get("received_bytes", 0))
                             stats["cpu"].append(float(response.get("cpu_percent", 0.0)))
                             stats["memory"].append(float(response.get("memory_percent", 0.0)))
-                            stats["bytes"] += int(task["image"].nbytes)
                             stats["retries"] += int(retried)
                             if retried and worker["ip"] != task.get("assigned_worker_ip"):
                                 task_status = f"REROUTED TO {worker['host']}"
@@ -667,15 +610,12 @@ def main() -> None:
                                 task_status = "SUCCESS"
                             task["status"] = task_status
                             region = f"x={task['x']}..{task['x_end']-1},y={task['y']}..{task['y_end']-1}"
-                            detail = {"id": task["id"], "label": task["label"], "worker": task.get("assigned_worker", worker["host"]), "status": task_status, "region": region, "bytes_in": transport.get("sent_bytes", task["image"].nbytes), "bytes_out": transport.get("received_bytes", 0), "connect": transport.get("connect", 0), "upload": transport.get("upload", 0), "busy_wait": transport.get("busy_wait", 0), "worker_wait": transport.get("worker_wait", 0), "compute": response.get("compute_seconds", 0), "download": transport.get("download", 0), "total": transport.get("total", 0), "retried": retried}
-                            detail["network"] = task_network
+                            detail = {"id": task["id"], "label": task["label"], "worker": task.get("assigned_worker", worker["host"]), "status": task_status, "region": region, "total": transport.get("total", 0)}
                             detail["network_intervals"] = task_network_intervals
                             detail["compute"] = task_compute
-                            detail["other"] = task_other
                             task_details.append(detail)
-                            print(f"[TASK] {task['label']} -> {worker['host']} tile={region} connect={detail['connect']:.3f}s network={detail['network']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s task_data={detail['bytes_in']/1e6:.2f}MB result_data={detail['bytes_out']/1e6:.2f}MB")
+                            print(f"[TASK] {task['label']} -> {worker['host']} elapsed={detail['total']:.3f}s")
                             pieces[(task["y"], task["x"])] = crop_tile_core(part, task)
-                            completed += 1
                         if args.scheduler == "dynamic" and pending_tasks and slots:
                             submit(worker if worker in slots else slots[0], pending_tasks.pop(0))
                 if pending_tasks:
@@ -701,7 +641,7 @@ def main() -> None:
     # duration and the expected 1x / 100% single-process reference values.
     if args.mode == "sequential":
         baseline_seconds = elapsed
-    path = Path(args.output) / f"{original_path.stem}-after.png"
+    path = Path(args.output) / f"{original_path.stem}-after-nlm-sw{args.nlm_search_window}.png"
     save_image(path, result)
     status = "PARTIAL" if failed_tasks else "COMPLETE"
     print(f"[MASTER] status={status} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
@@ -712,10 +652,10 @@ def main() -> None:
         f"Original image: {original_path}",
         f"Noisy input: {before_path}",
         f"Resolution: {w}x{h}",
-        f"Gaussian noise: sigma={args.noise_sigma:g}, seed={args.noise_seed}",
         f"Noise preparation: {noise_preparation_seconds:.6f}s (excluded from T_run)",
-        f"NLM parameters: search_window={args.nlm_search_window}, h={args.nlm_h:g}, hColor={args.nlm_h_color:g}, template=7",
+        f"NLM search window: {args.nlm_search_window}",
         f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}",
+        f"Fault tolerance: {'Y' if args.fault_tolerance else 'N' if args.fault_tolerance is not None else 'n/a'}",
         f"Output: {path}", f"Execution time: {elapsed:.6f}s",
         f"Throughput: {throughput:.3f} input-pixels/s",
     ]
@@ -729,12 +669,11 @@ def main() -> None:
     analysis_rows = [
         ("Operation", "NLM denoising"),
         ("Input", f"{original_path.name} -> {before_path.name}"),
-        ("Gaussian noise sigma", f"{args.noise_sigma:g} (seed={args.noise_seed})"),
         ("Noise preparation", f"{noise_preparation_seconds:.3f}s; excluded from T_run"),
         ("NLM search window", str(args.nlm_search_window)),
-        ("NLM strength h/hColor", f"{args.nlm_h:g}/{args.nlm_h_color:g}"),
         ("Execution mode", args.mode),
         ("Scheduler", args.scheduler),
+        ("Fault tolerance", "Y" if args.fault_tolerance else "N" if args.fault_tolerance is not None else "n/a"),
         ("Worker nodes", str(planned_worker_count)),
         ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"),
         ("T_run", f"{elapsed:.3f}s"),
@@ -766,31 +705,31 @@ def main() -> None:
             ("Other (whole job)", run_other),
             ("T_run total", elapsed),
         ]
-        print("\n[T_RUN PHASE WALL TIMES - NETWORK EXCLUDES COMPUTE OVERLAP]")
+        print("\n[RUN TIME OVERALL]")
         phase_header = f"{'PHASE':<30} {'WALL TIME':>12}"
         print(phase_header)
-        report.extend(["", "T_RUN PHASE WALL TIMES - NETWORK EXCLUDES COMPUTE OVERLAP", phase_header])
+        report.extend(["", "RUN TIME OVERALL", phase_header])
         for phase, seconds in phase_rows:
             line = f"{phase:<30} {seconds:>11.3f}s"
             print(line); report.append(line)
     if worker_stats:
-        header = f"{'WORKER':<22} {'TASKS':>5} {'FAILED':>6} {'NETWORK':>10} {'COMPUTE':>9} {'OTHER (WORKER)':>14} {'ACTIVE':>9} {'AVG CPU':>9} {'AVG RAM':>9} {'TASK MB':>9} {'RESULT MB':>10} {'RETRY':>6}"
-        print("\n[WORKER PHASE WALL TIMES - COMPUTE OVERLAP REMOVED]")
+        header = f"{'WORKER':<22} {'TASKS':>5} {'FAILED':>6} {'NETWORK':>10} {'COMPUTE':>9} {'AVG CPU':>9} {'AVG RAM':>9} {'RETRY':>6}"
+        print("\n[WORKER TIME]")
         print(header)
         report.extend(["", "WORKER PERFORMANCE", header])
         for stat in worker_stats.values():
             avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
             avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
-            worker_wall = interval_union_seconds(stat["master_active_intervals"])
-            active = stat["master_active_intervals"]
-            worker_network = clip_intervals(stat["master_upload_intervals"] + stat["master_download_intervals"], active)
-            worker_compute = clip_intervals(stat["master_compute_intervals"], active)
+            worker_network = clip_intervals(
+                stat["master_upload_intervals"] + stat["master_download_intervals"],
+                run_window,
+            )
+            worker_compute = clip_intervals(stat["master_compute_intervals"], run_window)
             # Use the same job-wide compute overlap removed from T_RUN.
             worker_network = subtract_intervals(worker_network, run_compute)
             network_wall = interval_union_seconds(worker_network)
             compute_wall = interval_union_seconds(worker_compute)
-            worker_other = max(0.0, worker_wall - network_wall - compute_wall)
-            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['failed']:>6} {network_wall:>9.3f}s {compute_wall:>8.3f}s {worker_other:>13.3f}s {worker_wall:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>9.2f} {stat['retries']:>6}"
+            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['failed']:>6} {network_wall:>9.3f}s {compute_wall:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['retries']:>6}"
             print(row); report.append(row)
     detailed_ids = {item["id"] for item in task_details}
     for task in failed_tasks:
@@ -802,41 +741,33 @@ def main() -> None:
             "worker": task.get("assigned_worker", task.get("failed_on", "-")),
             "status": task.get("status", "FAILED"),
             "region": f"x={task['x']}..{task['x_end']-1},y={task['y']}..{task['y_end']-1}",
-            "bytes_in": task["image"].nbytes,
-            "bytes_out": None,
             "network": None,
             "compute": None,
-            "other": None,
             "total": None,
         })
-    task_header = f"{'TASK':<12} {'WORKER':<22} {'REGION':<27} {'STATUS':<30} {'TASK MB':>8} {'RESULT MB':>10} {'NETWORK':>10} {'NETWORK MB/S':>13} {'COMPUTE':>9} {'OTHER (TASK)':>12} {'TOTAL TIME':>11}"
-    print("\n[TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP]"); print(task_header)
-    report.extend(["", "TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP", task_header])
+    task_header = f"{'TASK':<12} {'WORKER':<22} {'REGION':<27} {'STATUS':<30} {'NETWORK':>10} {'COMPUTE':>9} {'TOTAL TIME':>11}"
+    print("\n[TASK TIME]"); print(task_header)
+    report.extend(["", "TASK TIME", task_header])
     for item in task_details:
-        input_mb = item["bytes_in"] / 1e6
-        if item["bytes_out"] is None:
-            result_mb = network_rate = network = compute = other = total = "-"
+        if item["total"] is None:
+            network = compute = total = "-"
         else:
             # Keep task Network on the same basis as the global T_RUN row:
             # any concurrent Worker compute interval is excluded.
             item["network"] = interval_union_seconds(
                 subtract_intervals(item["network_intervals"], run_compute)
             )
-            item["other"] = max(0.0, item["total"] - item["network"] - item["compute"])
-            result_mb = f"{item['bytes_out'] / 1e6:.2f}"
-            network_rate = f"{(input_mb + item['bytes_out'] / 1e6) / item['network']:.2f}" if item["network"] else "0.00"
             network = f"{item['network']:.3f}s"
             compute = f"{item['compute']:.3f}s"
-            other = f"{item['other']:.3f}s"
             total = f"{item['total']:.3f}s"
-        row = f"{item['label']:<12} {item['worker'][:22]:<22} {item['region']:<27} {item['status']:<30} {input_mb:>7.2f} {result_mb:>9} {network:>10} {network_rate:>13} {compute:>9} {other:>12} {total:>11}"
+        row = f"{item['label']:<12} {item['worker'][:22]:<22} {item['region']:<27} {item['status']:<30} {network:>10} {compute:>9} {total:>11}"
         print(row); report.append(row)
     recovery_line = f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s"
     print("\n" + recovery_line); report.append(recovery_line)
     report.extend(failure_events)
     log_dir = Path("logs"); log_dir.mkdir(parents=True, exist_ok=True)
     safe_master = "".join(c if c.isalnum() or c in "-_" else "_" for c in socket.gethostname())
-    log_name = f"{safe_master}_{w}x{h}_nlm_sigma{args.noise_sigma:g}_sw{args.nlm_search_window}_{args.mode}_{args.scheduler}_{len(workers) if args.mode == 'distributed' else 0}workers_{time.strftime('%Y%m%d-%H%M%S')}.txt"
+    log_name = f"{safe_master}_{w}x{h}_nlm_sw{args.nlm_search_window}_{args.mode}_{args.scheduler}_{len(workers) if args.mode == 'distributed' else 0}workers_{time.strftime('%Y%m%d-%H%M%S')}.txt"
     log_path = log_dir / log_name
     log_path.write_text("\n".join(report) + "\n", encoding="utf-8")
     print(f"[LOG] benchmark report saved: {log_path}")
