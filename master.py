@@ -76,6 +76,8 @@ def worker_info(host: str, port: int) -> dict:
 def discover_workers(timeout: float = 1.5) -> list[dict]:
     found: dict[str, dict] = {}
     broadcasts = {"255.255.255.255"}
+    local_networks: set[ipaddress.IPv4Network] = set()
+    local_ips: set[str] = set()
     for addresses in psutil.net_if_addrs().values():
         for address in addresses:
             if address.family != socket.AF_INET or not address.address or not address.netmask:
@@ -86,6 +88,11 @@ def discover_workers(timeout: float = 1.5) -> list[dict]:
                     continue
                 network = ipaddress.IPv4Network(f"{address.address}/{address.netmask}", strict=False)
                 broadcasts.add(str(network.broadcast_address))
+                local_ips.add(address.address)
+                # Keep fallback discovery bounded to a /24 on large networks.
+                if network.prefixlen < 24:
+                    network = ipaddress.IPv4Network(f"{address.address}/24", strict=False)
+                local_networks.add(network)
             except ValueError:
                 continue
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -108,6 +115,25 @@ def discover_workers(timeout: float = 1.5) -> list[dict]:
                 break
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 print(f"[DISCOVERY] invalid response: {exc}")
+    def probe(ip: str) -> dict | None:
+        if ip in local_ips:
+            return None
+        try:
+            with socket.create_connection((ip, DEFAULT_PORT), timeout=0.2) as conn:
+                conn.settimeout(0.5)
+                send_json(conn, {"action": "info"})
+                info = recv_json(conn)
+                if info.get("ok"):
+                    return info | {"ip": ip, "port": DEFAULT_PORT}
+        except (OSError, ValueError):
+            pass
+        return None
+
+    targets = [str(ip) for network in local_networks for ip in network.hosts() if str(ip) not in local_ips]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=128) as pool:
+        for worker in pool.map(probe, targets):
+            if worker:
+                found[worker["ip"]] = worker
     return list(found.values())
 
 
@@ -128,20 +154,31 @@ def remote_task(worker: dict, task: dict, scale: float) -> tuple[dict, np.ndarra
             raise RuntimeError(acknowledgement.get("error", "worker rejected task"))
         upload_started = time.perf_counter()
         send_bytes(sock, payload)
-        upload_seconds = time.perf_counter() - upload_started
+        local_send_seconds = time.perf_counter() - upload_started
         response_started = time.perf_counter()
         response = recv_json(sock)
+        response_received_at = time.perf_counter()
         if not response.get("ok"):
             raise RuntimeError(response.get("error", "worker failed"))
-        response_wait_seconds = time.perf_counter() - response_started
+        # Measure upload at its receiver. sendall() only measures when local
+        # TCP buffers accept bytes, which can be much shorter than delivery.
+        input_interval = response.get("input_receive_interval", (0.0, 0.0))
+        reported_upload = response.get("input_receive_seconds")
+        if reported_upload is None and len(input_interval) == 2 and input_interval[1] > input_interval[0]:
+            reported_upload = input_interval[1] - input_interval[0]
+        upload_seconds = float(reported_upload if reported_upload is not None else local_send_seconds)
+        upload_interval = (upload_started, upload_started + upload_seconds)
+        response_wait_seconds = response_received_at - response_started
         download_started = time.perf_counter()
         raw = recv_bytes(sock)
         download_seconds = time.perf_counter() - download_started
+        download_interval = (download_started, time.perf_counter())
         phase_intervals = recv_json(sock)
     result = np.frombuffer(raw, dtype=np.uint8).reshape(response["shape"]).copy()
     if checksum(result) != response["checksum"]:
         raise ValueError("result checksum mismatch")
-    response["transport"] = {"connect": connect_seconds, "upload": upload_seconds, "busy_wait": 0.0, "worker_wait": response_wait_seconds, "download": download_seconds, "total": time.perf_counter() - task_started, "sent_bytes": len(payload), "received_bytes": len(raw)}
+    compute_seconds = float(response.get("compute_seconds", 0.0))
+    response["transport"] = {"connect": connect_seconds, "upload": upload_seconds, "upload_interval": upload_interval, "busy_wait": 0.0, "worker_wait": response_wait_seconds, "download": download_seconds, "download_interval": download_interval, "compute_interval": (max(upload_interval[1], response_received_at - compute_seconds), response_received_at), "task_interval": (upload_interval[0], download_interval[1]), "total": time.perf_counter() - task_started, "sent_bytes": len(payload), "received_bytes": len(raw)}
     response["phase_intervals"] = phase_intervals
     return response, result
 
@@ -160,18 +197,14 @@ def main() -> None:
     parser.add_argument("--workers", type=int, help="limit discovered workers")
     parser.add_argument("--scheduler", choices=("dynamic", "static"), default="dynamic")
     parser.add_argument("--fault-tolerance", action=argparse.BooleanOptionalAction, default=None, help="retry failed tasks on another Worker")
-    parser.add_argument("--rows-per-task", type=int, default=256)
+    parser.add_argument("--rows-per-task", type=int, default=0, help="set manually; 0 selects task count from detected process slots")
     parser.add_argument("--output", default="after")
     args = parser.parse_args()
     workers: list[dict] = []
     planned_worker_count = 0
     # No-argument launch is the guided terminal interface used for demos.
     if not args.input:
-        print("=== Distributed Image Upscaler ===\n[MASTER] Scanning LAN for Workers...")
-        found = discover_workers()
-        for i, worker in enumerate(found, 1):
-            print(f"  [{i}] {worker['host']}  {worker['ip']}:{worker['port']}  processes={worker.get('slots', worker.get('cores', 1))}")
-        if not found: print("  No Workers discovered. Start worker.py first; you can still choose local modes.")
+        print("=== Distributed Image Upscaler ===")
         while True:
             entered_path = input("Image path or filename in before/: ").strip()
             candidate = Path(entered_path).expanduser()
@@ -190,8 +223,11 @@ def main() -> None:
         modes = {"1": "sequential", "2": "local-parallel", "3": "distributed"}
         while args.mode not in modes.values(): args.mode = modes.get(input("Mode [1-3]: ").strip())
         if args.mode == "distributed":
+            print("[MASTER] Scanning LAN for Workers...")
+            found = discover_workers()
             if not found:
-                print("No discovered nodes; enter Worker addresses as host:port separated by commas (blank to cancel).")
+                print("  No Workers discovered automatically.")
+                print("Enter Worker addresses as host:port separated by commas (blank to cancel).")
                 raw = input("Workers: ").strip()
                 for spec in filter(None, (item.strip() for item in raw.split(","))):
                     host, _, port = spec.partition(":")
@@ -253,7 +289,17 @@ def main() -> None:
     else:
         preparation_started = time.perf_counter()
         tasks = []
-        size = max(1, args.rows_per_task)
+        if args.rows_per_task > 0:
+            size = args.rows_per_task
+            task_count = (h + size - 1) // size
+        else:
+            process_slots = (sum(max(1, int(worker.get("slots", worker.get("cores", 1)))) for worker in workers)
+                             if args.mode == "distributed" else (multiprocessing.cpu_count() or 1))
+            # Create about two tasks per process slot for dynamic balancing,
+            # while keeping strips at least roughly 64 source rows tall.
+            task_count = min(max(1, process_slots * 2), max(1, (h + 63) // 64))
+            size = max(1, (h + task_count - 1) // task_count)
+        print(f"[TASK DECOMPOSITION] rows_per_task={size} task_count={(h + size - 1) // size} process_slots={process_slots if args.rows_per_task <= 0 else 'manual'}")
         for y in range(0, h, size):
             # Context rows reduce boundary artifacts; crop overlap after scaling.
             lo, hi = max(0, y - 16), min(h, y + size + 16)
@@ -270,7 +316,16 @@ def main() -> None:
         else:
             print("[MASTER] workers=" + ", ".join(f"{w['host']}@{w['ip']}({w.get('cores', 1)} processes)" for w in workers))
             pending_tasks = list(tasks)
-            slots = [w for w in workers for _ in range(max(1, int(w.get("slots", w.get("cores", 1))))) ]
+            # Give every distinct Worker one initial task before assigning its
+            # additional local process slots. This prevents the first node in
+            # the list from consuming a small workload by itself.
+            slots = []
+            max_slots = max((max(1, int(w.get("slots", w.get("cores", 1)))) for w in workers), default=1)
+            for slot_index in range(max_slots):
+                for worker_node in workers:
+                    worker_capacity = max(1, int(worker_node.get("slots", worker_node.get("cores", 1))))
+                    if slot_index < worker_capacity:
+                        slots.append(worker_node)
             completed = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(slots)) as pool:
                 active = {}
@@ -327,14 +382,15 @@ def main() -> None:
                                     print(f"[RECOVERED] task={task['id']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
                         if not lost:
                             transport = response.get("transport", {})
-                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "task_total": 0.0, "other": 0.0, "worker_elapsed": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0, "compute_intervals": [], "upload_intervals": [], "download_intervals": [], "active_intervals": []})
+                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "task_total": 0.0, "other": 0.0, "worker_elapsed": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0, "compute_intervals": [], "upload_intervals": [], "download_intervals": [], "active_intervals": [], "master_upload_intervals": [], "master_download_intervals": [], "master_compute_intervals": [], "master_active_intervals": []})
                             stats["tasks"] += 1
                             stats["compute"] += float(response.get("compute_seconds", 0.0))
                             stats["worker_elapsed"] += float(response.get("worker_elapsed", 0.0))
                             phase_intervals = response.get("phase_intervals", {})
-                            stats["compute_intervals"].append(tuple(response.get("compute_interval", (0, 0))))
-                            stats["upload_intervals"].append(tuple(response.get("input_receive_interval", (0, 0))))
-                            stats["download_intervals"].append(tuple(phase_intervals.get("output_send_interval", (0, 0))))
+                            stats["master_upload_intervals"].append(tuple(transport.get("upload_interval", (0, 0))))
+                            stats["master_download_intervals"].append(tuple(transport.get("download_interval", (0, 0))))
+                            stats["master_compute_intervals"].append(tuple(transport.get("compute_interval", (0, 0))))
+                            stats["master_active_intervals"].append(tuple(transport.get("task_interval", (0, 0))))
                             stats["active_intervals"].append(tuple(phase_intervals.get("worker_interval", (0, 0))))
                             stats["task_total"] += float(transport.get("total", 0.0))
                             stats["other"] += max(0.0, float(transport.get("total", 0.0)) - float(transport.get("upload", 0.0)) - float(response.get("compute_seconds", 0.0)) - float(transport.get("download", 0.0)))
@@ -386,10 +442,9 @@ def main() -> None:
         line = f"{label:<24} {value}"
         print(line); report.append(line)
     if args.mode != "sequential":
-        all_upload_intervals = [interval for stat in worker_stats.values() for interval in stat["upload_intervals"]]
-        all_compute_intervals = [interval for stat in worker_stats.values() for interval in stat["compute_intervals"]]
-        all_download_intervals = [interval for stat in worker_stats.values() for interval in stat["download_intervals"]]
-        all_active_intervals = [interval for stat in worker_stats.values() for interval in stat["active_intervals"]]
+        all_upload_intervals = [interval for stat in worker_stats.values() for interval in stat["master_upload_intervals"]]
+        all_compute_intervals = [interval for stat in worker_stats.values() for interval in stat["master_compute_intervals"]]
+        all_download_intervals = [interval for stat in worker_stats.values() for interval in stat["master_download_intervals"]]
         all_upload = interval_union_seconds(all_upload_intervals)
         all_compute = interval_union_seconds(subtract_intervals(all_compute_intervals, all_upload_intervals))
         all_download = interval_union_seconds(subtract_intervals(all_download_intervals, all_upload_intervals + all_compute_intervals))
@@ -418,10 +473,10 @@ def main() -> None:
         for stat in worker_stats.values():
             avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
             avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
-            upload_wall = interval_union_seconds(stat["upload_intervals"])
-            compute_wall = interval_union_seconds(subtract_intervals(stat["compute_intervals"], stat["upload_intervals"]))
-            download_wall = interval_union_seconds(subtract_intervals(stat["download_intervals"], stat["upload_intervals"] + stat["compute_intervals"]))
-            worker_wall = interval_union_seconds(stat["active_intervals"])
+            upload_wall = interval_union_seconds(stat["master_upload_intervals"])
+            compute_wall = interval_union_seconds(subtract_intervals(stat["master_compute_intervals"], stat["master_upload_intervals"]))
+            download_wall = interval_union_seconds(subtract_intervals(stat["master_download_intervals"], stat["master_upload_intervals"] + stat["master_compute_intervals"]))
+            worker_wall = interval_union_seconds(stat["master_active_intervals"])
             worker_other = max(0.0, worker_wall - upload_wall - compute_wall - download_wall)
             row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {upload_wall:>8.3f}s {compute_wall:>8.3f}s {download_wall:>9.3f}s {worker_other:>8.3f}s {worker_wall:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
             print(row); report.append(row)

@@ -1,0 +1,48 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 2.2x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_2.2x.png
+Execution time: 10.440330s
+Throughput: 401740.551 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             1
+T_seq                    2.661s
+T_run                    10.440s
+Speedup                  0.255x
+Efficiency               25.48% (P=1)
+Throughput               401740.55 input-pixels/s
+
+T_RUN DETAIL
+PHASE                             WALL TIME
+Task preparation                     0.000s
+Upload (all Workers)                 1.422s
+Pure compute (all Workers)           0.636s
+Download (all Workers)               0.011s
+Other                                8.306s
+Stitching                            0.065s
+T_run total                         10.440s
+
+WORKER PERFORMANCE
+WORKER                 TASKS    UPLOAD   COMPUTE   DOWNLOAD     OTHER    ACTIVE   AVG CPU   AVG RAM     IN MB    OUT MB  RETRY
+DESKTOP-F40ABI3            8    1.422s    0.636s     0.011s    1.412s    3.480s     43.2%     43.2%    13.96    67.59      0
+
+TASK TIMINGS
+TASK       WORKER                 ROWS               UPLOAD   COMPUTE  DOWNLOAD     OTHER  TOTAL TIME
+f497981f   DESKTOP-F40ABI3        1792..2047         1.107s    0.403s    1.316s    2.262s      5.089s
+c16f17e3   DESKTOP-F40ABI3        1280..1535         1.181s    0.471s    2.587s    2.019s      6.257s
+68bdb450   DESKTOP-F40ABI3        0..255             1.149s    0.503s    2.888s    1.913s      6.453s
+8e168659   DESKTOP-F40ABI3        1536..1791         1.094s    0.531s    5.120s    2.238s      8.983s
+b3501c8b   DESKTOP-F40ABI3        1024..1279         1.134s    0.427s    5.833s    2.432s      9.827s
+f2fd0dbc   DESKTOP-F40ABI3        512..767           1.058s    0.402s    6.002s    2.469s      9.931s
+9d64a988   DESKTOP-F40ABI3        256..511           1.194s    0.292s    6.112s    2.486s     10.084s
+975c76b8   DESKTOP-F40ABI3        768..1023          1.165s    0.492s    6.431s    2.051s     10.140s
+[RECOVERY] retries=0 recovery_time=0.000s

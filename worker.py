@@ -42,9 +42,9 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
             reserved = True
             send_json(conn, {"ok": True, "accepted": True})
             task_started_epoch = time.time()
-            input_receive_started = time.time()
+            input_receive_started = time.perf_counter()
             payload = recv_bytes(conn)
-            input_receive_interval = (input_receive_started, time.time())
+            input_receive_seconds = time.perf_counter() - input_receive_started
             if checksum(np.frombuffer(payload, dtype=np.uint8)) != request["checksum"]:
                 raise ValueError("input checksum mismatch")
             started = time.perf_counter()
@@ -64,7 +64,7 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
             output, shape, digest, compute_seconds, compute_interval = future.result()
             avg_cpu = sum(x[0] for x in samples) / len(samples) if samples else 0.0
             avg_mem = sum(x[1] for x in samples) / len(samples) if samples else psutil.virtual_memory().percent
-            send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "worker_elapsed": time.perf_counter() - started, "compute_seconds": compute_seconds, "compute_interval": compute_interval, "input_receive_interval": input_receive_interval, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
+            send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "worker_elapsed": time.perf_counter() - started, "compute_seconds": compute_seconds, "compute_interval": compute_interval, "input_receive_seconds": input_receive_seconds, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
             output_send_started = time.time()
             send_bytes(conn, output)
             output_send_interval = (output_send_started, time.time())
