@@ -75,7 +75,7 @@ Worker memakai seluruh core CPU yang terdeteksi secara default. Biarkan terminal
 
 Worker membatasi penerimaan task aktif sesuai jumlah slot prosesnya. Jika semua slot sedang digunakan—misalnya oleh Master lain—Worker menjawab `busy` dan Master langsung menolak/membatalkan job tanpa menunggu atau mengalihkan task diam-diam.
 
-Setelah Worker aktif, pada komputer Master jalankan `python master.py`. Master akan memindai Worker, menampilkan daftar perangkat, lalu meminta path gambar, faktor skala, mode pemrosesan, pilihan Worker, dan scheduler. Path gambar harus menunjuk ke file yang ada di komputer Master, misalnya `before/anime.png`.
+Setelah Worker aktif, pada komputer Master jalankan `python master.py`. Master akan memindai Worker, menampilkan daftar perangkat, lalu meminta gambar, faktor skala, mode pemrosesan, pilihan Worker, dan scheduler. Untuk gambar di `before/`, cukup ketik nama file seperti `anime.png`; path relatif `before/anime.png` dan path absolut juga diterima.
 
 Mode pemrosesan:
 
@@ -90,7 +90,7 @@ Scheduler:
 
 Setelah memilih scheduler, Master menanyakan apakah fault tolerance diaktifkan. Jika **tidak**, task yang gagal tidak di-retry; task lain tetap diproses dan gambar parsial disimpan dengan area task gagal berwarna magenta. Jika **ya**, Master mencoba retry ke Worker lain dan mencetak ID task, Worker asal dan alasan gagal, Worker tujuan, serta waktu recovery. Jika retry ke semua Worker lain gagal, area task tersebut ditandai magenta dan hasil parsial tetap disimpan.
 
-Output gambar disimpan di `after/`. Untuk mode local-parallel dan distributed, Master juga menjalankan sequential baseline pada input yang sama dan menampilkan metrik utama dalam tabel. Tabel Worker menampilkan `WORKER WALL`, yaitu waktu nyata dari task pertama mulai sampai task terakhir selesai pada host tersebut. Kolom `Σ UPLOAD`, `Σ COMPUTE`, `Σ DOWNLOAD`, dan `Σ OTHER` adalah jumlah durasi task, yang dapat saling tumpang tindih; bukan wall-clock. Pada tabel task, `UPLOAD + COMPUTE + DOWNLOAD + OTHER = TOTAL TIME`. `OTHER` adalah sisa overhead seperti koneksi dan waktu tunggu/penyiapan Worker. CPU dirata-ratakan dari sampel proses Worker dan anak prosesnya; RAM adalah persentase penggunaan memori sistem host. Metrik CPU/RAM ditampilkan terpisah per Worker. Laporan teks otomatis dibuat di `logs/` dengan nama berisi hostname Master, resolusi, skala, mode, scheduler, jumlah Worker, dan waktu run.
+Output gambar disimpan di `after/`. Untuk mode local-parallel dan distributed, Master juga menjalankan sequential baseline pada input yang sama dan menampilkan metrik utama dalam tabel. Tabel Worker mengukur upload (waktu Worker menerima data), compute murni, download (waktu Worker mengirim hasil), serta active wall (rentang waktu Worker menangani task). Interval yang tumpang tindih digabung agar tidak dijumlahkan berulang; fase-fase dapat tumpang tindih satu sama lain, jadi jangan dijumlahkan untuk memperoleh total job. Tabel task tetap menunjukkan durasi per-task. CPU dirata-ratakan dari sampel proses Worker dan anak prosesnya; RAM adalah persentase penggunaan memori sistem host. Metrik CPU/RAM ditampilkan terpisah per Worker. Laporan teks otomatis dibuat di `logs/` dengan nama berisi hostname Master, resolusi, skala, mode, scheduler, jumlah Worker, dan waktu run.
 
 ## 5. Uji fault tolerance
 

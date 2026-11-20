@@ -29,6 +29,22 @@ def scale_arg(value: str) -> float:
     return scale
 
 
+def interval_union_seconds(intervals: list[tuple[float, float]]) -> float:
+    """Elapsed wall time covered by intervals, counting overlaps only once."""
+    ordered = sorted((start, end) for start, end in intervals if end >= start)
+    if not ordered:
+        return 0.0
+    total = 0.0
+    start, end = ordered[0]
+    for next_start, next_end in ordered[1:]:
+        if next_start <= end:
+            end = max(end, next_end)
+        else:
+            total += end - start
+            start, end = next_start, next_end
+    return total + end - start
+
+
 def worker_info(host: str, port: int) -> dict:
     with socket.create_connection((host, port), timeout=3) as sock:
         send_json(sock, {"action": "info"})
@@ -99,10 +115,12 @@ def remote_task(worker: dict, task: dict, scale: float) -> tuple[dict, np.ndarra
         download_started = time.perf_counter()
         raw = recv_bytes(sock)
         download_seconds = time.perf_counter() - download_started
+        phase_intervals = recv_json(sock)
     result = np.frombuffer(raw, dtype=np.uint8).reshape(response["shape"]).copy()
     if checksum(result) != response["checksum"]:
         raise ValueError("result checksum mismatch")
     response["transport"] = {"connect": connect_seconds, "upload": upload_seconds, "busy_wait": 0.0, "worker_wait": response_wait_seconds, "download": download_seconds, "total": time.perf_counter() - task_started, "sent_bytes": len(payload), "received_bytes": len(raw)}
+    response["phase_intervals"] = phase_intervals
     return response, result
 
 
@@ -131,9 +149,16 @@ def main() -> None:
             print(f"  [{i}] {worker['host']}  {worker['ip']}:{worker['port']}  processes={worker.get('slots', worker.get('cores', 1))}")
         if not found: print("  No Workers discovered. Start worker.py first; you can still choose local modes.")
         while True:
-            args.input = input("Image path: ").strip()
-            if Path(args.input).is_file(): break
-            print("File not found; enter a valid image path.")
+            entered_path = input("Image path or filename in before/: ").strip()
+            candidate = Path(entered_path).expanduser()
+            if candidate.is_file():
+                args.input = str(candidate)
+                break
+            before_candidate = Path("before") / candidate.name
+            if candidate.parent == Path(".") and before_candidate.is_file():
+                args.input = str(before_candidate)
+                break
+            print("File not found. Enter a valid path or a filename located in before/.")
         while args.scale is None:
             try: args.scale = scale_arg(input("Upscale factor (1.0-10.0): ").strip())
             except (ValueError, argparse.ArgumentTypeError) as exc: print(f"Invalid scale: {exc}")
@@ -269,12 +294,15 @@ def main() -> None:
                                     print(f"[RECOVERED] task={task['id']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
                         if not lost:
                             transport = response.get("transport", {})
-                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "task_total": 0.0, "other": 0.0, "worker_elapsed": 0.0, "worker_started": float("inf"), "worker_finished": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0})
+                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "task_total": 0.0, "other": 0.0, "worker_elapsed": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0, "compute_intervals": [], "upload_intervals": [], "download_intervals": [], "active_intervals": []})
                             stats["tasks"] += 1
                             stats["compute"] += float(response.get("compute_seconds", 0.0))
                             stats["worker_elapsed"] += float(response.get("worker_elapsed", 0.0))
-                            stats["worker_started"] = min(stats["worker_started"], float(response.get("worker_started_epoch", time.time())))
-                            stats["worker_finished"] = max(stats["worker_finished"], float(response.get("worker_finished_epoch", time.time())))
+                            phase_intervals = response.get("phase_intervals", {})
+                            stats["compute_intervals"].append(tuple(response.get("compute_interval", (0, 0))))
+                            stats["upload_intervals"].append(tuple(response.get("input_receive_interval", (0, 0))))
+                            stats["download_intervals"].append(tuple(phase_intervals.get("output_send_interval", (0, 0))))
+                            stats["active_intervals"].append(tuple(phase_intervals.get("worker_interval", (0, 0))))
                             stats["task_total"] += float(transport.get("total", 0.0))
                             stats["other"] += max(0.0, float(transport.get("total", 0.0)) - float(transport.get("upload", 0.0)) - float(response.get("compute_seconds", 0.0)) - float(transport.get("download", 0.0)))
                             for key in ("connect", "upload", "busy_wait", "worker_wait", "download"):
@@ -322,17 +350,20 @@ def main() -> None:
         line = f"{label:<24} {value}"
         print(line); report.append(line)
     if worker_stats:
-        header = f"{'WORKER':<22} {'TASKS':>5} {'Σ UPLOAD':>10} {'Σ COMPUTE':>11} {'Σ DOWNLOAD':>11} {'Σ OTHER':>9} {'WORKER WALL':>12} {'AVG CPU':>9} {'AVG RAM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
+        header = f"{'WORKER':<22} {'TASKS':>5} {'UPLOAD WALL':>12} {'COMPUTE WALL':>13} {'DOWNLOAD WALL':>14} {'ACTIVE WALL':>12} {'AVG CPU':>9} {'AVG RAM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
         print("\n[WORKER ANALYSIS]")
         print(header)
         report.extend(["", "WORKER PERFORMANCE", header])
         for stat in worker_stats.values():
             avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
             avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
-            worker_wall = max(0.0, stat["worker_finished"] - stat["worker_started"])
-            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['upload']:>9.3f}s {stat['compute']:>10.3f}s {stat['download']:>10.3f}s {stat['other']:>8.3f}s {worker_wall:>11.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
+            upload_wall = interval_union_seconds(stat["upload_intervals"])
+            compute_wall = interval_union_seconds(stat["compute_intervals"])
+            download_wall = interval_union_seconds(stat["download_intervals"])
+            worker_wall = interval_union_seconds(stat["active_intervals"])
+            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {upload_wall:>11.3f}s {compute_wall:>12.3f}s {download_wall:>13.3f}s {worker_wall:>11.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
             print(row); report.append(row)
-            report.append("  Note: Σ columns sum overlapping per-task durations; WORKER WALL is this Worker's real elapsed span.")
+            report.append("  Phase wall times merge overlapping task intervals; do not add phase columns together.")
     task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'UPLOAD':>9} {'COMPUTE':>9} {'DOWNLOAD':>9} {'OTHER':>9} {'TOTAL TIME':>11}"
     print("\n[TASK TIMINGS]"); print(task_header)
     report.extend(["", "TASK TIMINGS", task_header, "Task TOTAL TIME is per-task elapsed duration; task rows can overlap."])
