@@ -1,0 +1,40 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 2.3x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_2.3x.png
+Execution time: 25.415315s
+Throughput: 165030.570 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             1
+T_seq                    0.898s
+T_run (wall-clock)       25.415s
+Speedup                  0.035x
+Efficiency               3.53% (P=1)
+Throughput               165030.57 input-pixels/s
+
+WORKER PERFORMANCE
+WORKER                 TASKS  UPLOAD WALL  COMPUTE WALL  DOWNLOAD WALL  ACTIVE WALL   AVG CPU   AVG RAM     IN MB    OUT MB  RETRY
+localhost                  8       4.271s        1.638s         8.333s      15.235s     43.1%     73.5%    13.96    73.82      0
+  Phase wall times merge overlapping task intervals; do not add phase columns together.
+
+TASK TIMINGS
+TASK       WORKER                 ROWS               UPLOAD   COMPUTE  DOWNLOAD     OTHER  TOTAL TIME
+Task TOTAL TIME is per-task elapsed duration; task rows can overlap.
+bbbdcad4   localhost              1024..1279         3.973s    1.194s    4.230s    1.762s     11.159s
+efe20e4d   localhost              0..255             3.864s    1.215s    5.429s    1.855s     12.363s
+b126405c   localhost              1536..1791         3.967s    1.295s    8.968s    1.733s     15.963s
+6463ffac   localhost              1792..2047         2.811s    1.554s    9.446s    2.769s     16.580s
+dd4654c6   localhost              512..767           3.755s    1.066s    9.837s    2.481s     17.139s
+a606401c   localhost              256..511           4.032s    1.369s    9.898s    1.920s     17.220s
+e58fadac   localhost              768..1023          2.752s    1.070s    9.964s    3.496s     17.283s
+b1f10734   localhost              1280..1535         2.333s    1.582s   10.026s    3.410s     17.351s
+[RECOVERY] retries=0 recovery_time=0.000s

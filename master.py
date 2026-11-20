@@ -141,6 +141,8 @@ def main() -> None:
     parser.add_argument("--rows-per-task", type=int, default=256)
     parser.add_argument("--output", default="after")
     args = parser.parse_args()
+    workers: list[dict] = []
+    planned_worker_count = 0
     # No-argument launch is the guided terminal interface used for demos.
     if not args.input:
         print("=== Distributed Image Upscaler ===\n[MASTER] Scanning LAN for Workers...")
@@ -181,12 +183,30 @@ def main() -> None:
                     try: found = [found[int(item)-1] for item in selection.split(",") if 0 < int(item) <= len(found)]
                     except ValueError: print("Invalid selection; using all discovered Workers.")
             args.worker = [f"{w['ip']}:{w['port']}" for w in found]
+            workers = found
             print("Scheduler:\n  1) Dynamic: give a free Worker slot another task immediately\n  2) Static: assign all strips to Worker slots before processing")
             args.scheduler = "static" if input("Scheduler [1-2, default 1]: ").strip() == "2" else "dynamic"
             args.fault_tolerance = input("Enable fault tolerance? [y/N]: ").strip().lower() in ("y", "yes")
             print("[FAULT TOLERANCE] Enabled: failed tasks retry on another Worker. Disabled: a failed task stops the job; no partial output is saved.")
         print()
     args.mode = args.mode or "distributed"
+    # Discovery is setup and must not be included in T_run.
+    if args.mode == "distributed":
+        if not workers:
+            workers = discover_workers()
+        requested_hosts = {spec.partition(":")[0] for spec in args.worker}
+        if requested_hosts:
+            workers = [w for w in workers if w["ip"] in requested_hosts]
+        for spec in args.worker:
+            host, _, port = spec.partition(":")
+            if host not in {w["ip"] for w in workers}:
+                workers.append(worker_info(host, int(port or DEFAULT_PORT)))
+        if args.workers:
+            workers = workers[:args.workers]
+        if not workers:
+            parser.error("no Workers discovered; start worker.py before launching Master")
+        planned_worker_count = len(workers)
+        print("[MASTER] Selected Workers: " + ", ".join(f"{w['host']}@{w['ip']}" for w in workers))
     image = read_image(args.input)
     h, w, _ = image.shape
     print(f"[MASTER] {args.input} {w}x{h} mode={args.mode} scale={args.scale}")
@@ -200,21 +220,25 @@ def main() -> None:
     worker_stats: dict[str, dict] = {}
     task_details: list[dict] = []
     failure_events: list[str] = []
-    workers: list[dict] = []
     recovery_seconds = 0.0
     failed_tasks: list[dict] = []
-    planned_worker_count = 0
     started = time.perf_counter()
+    task_preparation_seconds = 0.0
+    parallel_wall_seconds = 0.0
+    stitching_seconds = 0.0
     if args.mode == "sequential":
         result = process_slice(image, args.scale)
     else:
+        preparation_started = time.perf_counter()
         tasks = []
         size = max(1, args.rows_per_task)
         for y in range(0, h, size):
             # Context rows reduce boundary artifacts; crop overlap after scaling.
             lo, hi = max(0, y - 16), min(h, y + size + 16)
             tasks.append({"id": uuid.uuid4().hex, "y": y, "end": min(h, y + size), "lo": lo, "image": image[lo:hi]})
+        task_preparation_seconds = time.perf_counter() - preparation_started
         pieces: dict[int, np.ndarray] = {}
+        parallel_started = time.perf_counter()
         if args.mode == "local-parallel":
             with concurrent.futures.ProcessPoolExecutor() as pool:
                 futures = {pool.submit(local_piece, (t["image"].tobytes(), t["image"].shape, args.scale)): t for t in tasks}
@@ -222,19 +246,6 @@ def main() -> None:
                     part = f.result(); top = round((t["y"] - t["lo"]) * args.scale); bottom = round((t["end"] - t["lo"]) * args.scale)
                     pieces[t["y"]] = part[top:bottom]
         else:
-            workers = discover_workers()
-            requested_hosts = {spec.partition(":")[0] for spec in args.worker}
-            if requested_hosts:
-                workers = [w for w in workers if w["ip"] in requested_hosts]
-            for spec in args.worker:
-                host, _, port = spec.partition(":")
-                if host not in {w["ip"] for w in workers}:
-                    workers.append(worker_info(host, int(port or DEFAULT_PORT)))
-            if args.workers:
-                workers = workers[:args.workers]
-            if not workers:
-                parser.error("no workers discovered; start worker.py on LAN or pass --worker HOST[:PORT]")
-            planned_worker_count = len(workers)
             print("[MASTER] workers=" + ", ".join(f"{w['host']}@{w['ip']}({w.get('cores', 1)} processes)" for w in workers))
             pending_tasks = list(tasks)
             slots = [w for w in workers for _ in range(max(1, int(w.get("slots", w.get("cores", 1))))) ]
@@ -323,6 +334,8 @@ def main() -> None:
                         if args.scheduler == "dynamic" and pending_tasks and slots:
                             submit(worker if worker in slots else slots[0], pending_tasks.pop(0))
                 if pending_tasks: raise RuntimeError("no active Worker slots for pending tasks")
+        parallel_wall_seconds = time.perf_counter() - parallel_started
+        stitching_started = time.perf_counter()
         if failed_tasks:
             output_shape = (round(h * args.scale), round(w * args.scale), 3)
             result = np.full(output_shape, (255, 0, 255), dtype=np.uint8)
@@ -332,6 +345,7 @@ def main() -> None:
             print(f"[PARTIAL IMAGE] {len(failed_tasks)} task region(s) highlighted magenta.")
         else:
             result = np.vstack([pieces[y] for y in sorted(pieces)])
+        stitching_seconds = time.perf_counter() - stitching_started
     elapsed = time.perf_counter() - started
     path = Path(args.output) / f"{Path(args.input).stem}_{args.scale:.1f}x.png"
     save_image(path, result)
@@ -339,6 +353,15 @@ def main() -> None:
     print(f"[MASTER] status={status} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
     throughput = h * w / elapsed if elapsed else 0.0
     report = ["Distributed Image Upscaler - Benchmark Report", f"Master: {socket.gethostname()}", f"Input: {args.input}", f"Resolution: {w}x{h}", f"Scale: {args.scale}x", f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}", f"Output: {path}", f"Execution time: {elapsed:.6f}s", f"Throughput: {throughput:.3f} input-pixels/s"]
+    if args.mode != "sequential":
+        phase_rows = [("Task preparation", task_preparation_seconds), ("Parallel execution wall", parallel_wall_seconds), ("Stitching", stitching_seconds), ("T_run total", elapsed)]
+        print("\n[T_RUN PHASES]")
+        print(f"{'PHASE':<28} {'WALL TIME':>12}")
+        report.extend(["", "T_RUN PHASES (these sequential phases sum to T_run)", f"{'PHASE':<28} {'WALL TIME':>12}"])
+        for phase, seconds in phase_rows:
+            line = f"{phase:<28} {seconds:>11.3f}s"
+            print(line); report.append(line)
+        report.append("Upload, pure compute, and download wall times are reported in the Worker table; they overlap during parallel execution and must not be added to the phases above.")
     parallelism = planned_worker_count if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
     speedup = baseline_seconds / elapsed if baseline_seconds is not None and elapsed else None
     efficiency = speedup / max(1, parallelism) * 100 if speedup is not None else None
@@ -349,6 +372,8 @@ def main() -> None:
     for label, value in analysis_rows:
         line = f"{label:<24} {value}"
         print(line); report.append(line)
+    if args.mode != "sequential":
+        print("Upload/compute/download are detailed under Worker phases; they overlap and are included inside Parallel execution wall.")
     if worker_stats:
         header = f"{'WORKER':<22} {'TASKS':>5} {'UPLOAD WALL':>12} {'COMPUTE WALL':>13} {'DOWNLOAD WALL':>14} {'ACTIVE WALL':>12} {'AVG CPU':>9} {'AVG RAM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
         print("\n[WORKER ANALYSIS]")
