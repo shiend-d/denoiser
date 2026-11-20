@@ -44,6 +44,7 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
             if checksum(np.frombuffer(payload, dtype=np.uint8)) != request["checksum"]:
                 raise ValueError("input checksum mismatch")
             started = time.perf_counter()
+            started_epoch = time.time()
             future = pool.submit(_process, payload, tuple(request["shape"]), float(request["scale"]))
             samples: list[tuple[float, float]] = []
             proc = psutil.Process()
@@ -59,7 +60,8 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
             output, shape, digest, compute_seconds = future.result()
             avg_cpu = sum(x[0] for x in samples) / len(samples) if samples else 0.0
             avg_mem = sum(x[1] for x in samples) / len(samples) if samples else psutil.virtual_memory().percent
-            send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "worker_elapsed": time.perf_counter() - started, "compute_seconds": compute_seconds, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
+            finished_epoch = time.time()
+            send_json(conn, {"ok": True, "task_id": request["task_id"], "host": socket.gethostname(), "shape": list(shape), "dtype": "uint8", "checksum": digest, "worker_started_epoch": started_epoch, "worker_finished_epoch": finished_epoch, "worker_elapsed": time.perf_counter() - started, "compute_seconds": compute_seconds, "cpu_percent": avg_cpu, "memory_percent": avg_mem})
             send_bytes(conn, output)
             print(f"[WORKER] task={request['task_id']} master={address[0]} input={len(payload)}B output={len(output)}B checksum={digest}", flush=True)
         except Exception as exc:

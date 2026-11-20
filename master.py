@@ -178,6 +178,7 @@ def main() -> None:
     workers: list[dict] = []
     recovery_seconds = 0.0
     failed_tasks: list[dict] = []
+    planned_worker_count = 0
     started = time.perf_counter()
     if args.mode == "sequential":
         result = process_slice(image, args.scale)
@@ -208,6 +209,7 @@ def main() -> None:
                 workers = workers[:args.workers]
             if not workers:
                 parser.error("no workers discovered; start worker.py on LAN or pass --worker HOST[:PORT]")
+            planned_worker_count = len(workers)
             print("[MASTER] workers=" + ", ".join(f"{w['host']}@{w['ip']}({w.get('cores', 1)} processes)" for w in workers))
             pending_tasks = list(tasks)
             slots = [w for w in workers for _ in range(max(1, int(w.get("slots", w.get("cores", 1))))) ]
@@ -267,11 +269,14 @@ def main() -> None:
                                     print(f"[RECOVERED] task={task['id']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
                         if not lost:
                             transport = response.get("transport", {})
-                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "task_total": 0.0, "worker_elapsed": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0})
+                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "task_total": 0.0, "other": 0.0, "worker_elapsed": 0.0, "worker_started": float("inf"), "worker_finished": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0})
                             stats["tasks"] += 1
                             stats["compute"] += float(response.get("compute_seconds", 0.0))
                             stats["worker_elapsed"] += float(response.get("worker_elapsed", 0.0))
+                            stats["worker_started"] = min(stats["worker_started"], float(response.get("worker_started_epoch", time.time())))
+                            stats["worker_finished"] = max(stats["worker_finished"], float(response.get("worker_finished_epoch", time.time())))
                             stats["task_total"] += float(transport.get("total", 0.0))
+                            stats["other"] += max(0.0, float(transport.get("total", 0.0)) - float(transport.get("upload", 0.0)) - float(response.get("compute_seconds", 0.0)) - float(transport.get("download", 0.0)))
                             for key in ("connect", "upload", "busy_wait", "worker_wait", "download"):
                                 stats[key] += float(transport.get(key, 0.0))
                             stats["network_bytes_in"] += int(transport.get("sent_bytes", task["image"].nbytes))
@@ -281,6 +286,7 @@ def main() -> None:
                             stats["bytes"] += int(task["image"].nbytes)
                             stats["retries"] += int(retried)
                             detail = {"id": task["id"], "worker": worker["host"], "rows": f"{task['y']}..{task['end']-1}", "bytes_in": transport.get("sent_bytes", task["image"].nbytes), "bytes_out": transport.get("received_bytes", 0), "connect": transport.get("connect", 0), "upload": transport.get("upload", 0), "busy_wait": transport.get("busy_wait", 0), "worker_wait": transport.get("worker_wait", 0), "compute": response.get("compute_seconds", 0), "download": transport.get("download", 0), "total": transport.get("total", 0), "retried": retried}
+                            detail["other"] = max(0.0, detail["total"] - detail["upload"] - detail["compute"] - detail["download"])
                             task_details.append(detail)
                             print(f"[TASK] {task['id'][:8]} -> {worker['host']} rows={detail['rows']} connect={detail['connect']:.3f}s upload={detail['upload']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s download={detail['download']:.3f}s in={detail['bytes_in']/1e6:.2f}MB out={detail['bytes_out']/1e6:.2f}MB")
                             top = round((task["y"] - task["lo"]) * args.scale); bottom = round((task["end"] - task["lo"]) * args.scale)
@@ -304,30 +310,34 @@ def main() -> None:
     status = "PARTIAL" if failed_tasks else "COMPLETE"
     print(f"[MASTER] status={status} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
     throughput = h * w / elapsed if elapsed else 0.0
-    print(f"[METRICS] mode={args.mode} scheduler={args.scheduler} workers={len(workers) if args.mode == 'distributed' else 0} execution={elapsed:.3f}s throughput={throughput:.2f} input-pixels/s")
     report = ["Distributed Image Upscaler - Benchmark Report", f"Master: {socket.gethostname()}", f"Input: {args.input}", f"Resolution: {w}x{h}", f"Scale: {args.scale}x", f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}", f"Output: {path}", f"Execution time: {elapsed:.6f}s", f"Throughput: {throughput:.3f} input-pixels/s"]
-    if baseline_seconds is not None:
-        parallelism = len(workers) if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
-        speedup = baseline_seconds / elapsed if elapsed else 0.0
-        efficiency = speedup / max(1, parallelism) * 100
-        analysis = f"[ANALYSIS] T_seq={baseline_seconds:.3f}s T_run={elapsed:.3f}s speedup={speedup:.3f}x efficiency={efficiency:.2f}% P={parallelism}"
-        print(analysis)
-        report.extend([f"Sequential baseline: {baseline_seconds:.6f}s", f"Speedup: {speedup:.6f}x", f"Efficiency: {efficiency:.3f}% (P={parallelism})"])
+    parallelism = planned_worker_count if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
+    speedup = baseline_seconds / elapsed if baseline_seconds is not None and elapsed else None
+    efficiency = speedup / max(1, parallelism) * 100 if speedup is not None else None
+    analysis_rows = [("Execution mode", args.mode), ("Scheduler", args.scheduler), ("Worker nodes", str(planned_worker_count)), ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"), ("T_run (wall-clock)", f"{elapsed:.3f}s"), ("Speedup", f"{speedup:.3f}x" if speedup is not None else "n/a"), ("Efficiency", f"{efficiency:.2f}% (P={parallelism})" if efficiency is not None else "n/a"), ("Throughput", f"{throughput:.2f} input-pixels/s")]
+    print("\n[OVERALL ANALYSIS]")
+    print(f"{'METRIC':<24} VALUE")
+    report.extend(["", "OVERALL ANALYSIS", f"{'METRIC':<24} VALUE"])
+    for label, value in analysis_rows:
+        line = f"{label:<24} {value}"
+        print(line); report.append(line)
     if worker_stats:
-        header = f"{'WORKER':<22} {'TASKS':>5} {'COMPUTE':>9} {'UPLOAD':>9} {'DOWNLOAD':>9} {'TOTAL TIME':>11} {'AVG CPU':>9} {'AVG MEM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
+        header = f"{'WORKER':<22} {'TASKS':>5} {'Σ UPLOAD':>10} {'Σ COMPUTE':>11} {'Σ DOWNLOAD':>11} {'Σ OTHER':>9} {'WORKER WALL':>12} {'AVG CPU':>9} {'AVG RAM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
         print("\n[WORKER ANALYSIS]")
         print(header)
         report.extend(["", "WORKER PERFORMANCE", header])
         for stat in worker_stats.values():
             avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
             avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
-            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['compute']:>8.3f}s {stat['upload']:>8.3f}s {stat['download']:>8.3f}s {stat['task_total']:>10.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
+            worker_wall = max(0.0, stat["worker_finished"] - stat["worker_started"])
+            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['upload']:>9.3f}s {stat['compute']:>10.3f}s {stat['download']:>10.3f}s {stat['other']:>8.3f}s {worker_wall:>11.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
             print(row); report.append(row)
-    task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'UPLOAD':>9} {'COMPUTE':>9} {'DOWNLOAD':>9} {'TOTAL TIME':>11}"
+            report.append("  Note: Σ columns sum overlapping per-task durations; WORKER WALL is this Worker's real elapsed span.")
+    task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'UPLOAD':>9} {'COMPUTE':>9} {'DOWNLOAD':>9} {'OTHER':>9} {'TOTAL TIME':>11}"
     print("\n[TASK TIMINGS]"); print(task_header)
-    report.extend(["", "TASK TIMINGS", task_header])
+    report.extend(["", "TASK TIMINGS", task_header, "Task TOTAL TIME is per-task elapsed duration; task rows can overlap."])
     for item in task_details:
-        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {item['upload']:>8.3f}s {item['compute']:>8.3f}s {item['download']:>8.3f}s {item['total']:>10.3f}s"
+        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {item['upload']:>8.3f}s {item['compute']:>8.3f}s {item['download']:>8.3f}s {item['other']:>8.3f}s {item['total']:>10.3f}s"
         print(row); report.append(row)
     recovery_line = f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s"
     print("\n" + recovery_line); report.append(recovery_line)

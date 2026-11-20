@@ -1,0 +1,30 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 3.0x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_3.0x.png
+Execution time: 40.093135s
+Throughput: 104614.018 input-pixels/s
+Sequential baseline: 1.194929s
+Speedup: 0.029804x
+Efficiency: 2.980% (P=1)
+
+WORKER PERFORMANCE
+WORKER                 TASKS    UPLOAD   COMPUTE  DOWNLOAD     OTHER  TOTAL TIME   AVG CPU   AVG MEM     IN MB    OUT MB  RETRY
+localhost                  8   14.853s   22.878s  172.130s   17.557s    227.419s     32.0%     71.1%    13.96   125.63      0
+
+TASK TIMINGS
+TASK       WORKER                 ROWS               UPLOAD   COMPUTE  DOWNLOAD     OTHER  TOTAL TIME
+375721e3   localhost              512..767           1.636s    3.173s   12.210s    1.853s     18.871s
+19ecf19a   localhost              0..255             2.158s    3.237s   21.828s    1.492s     28.714s
+a22d9734   localhost              1792..2047         2.104s    2.748s   22.274s    2.398s     29.524s
+92fd1961   localhost              1536..1791         2.134s    2.723s   22.803s    1.911s     29.571s
+32c72f59   localhost              768..1023          1.853s    3.078s   22.525s    2.125s     29.581s
+d6d1d768   localhost              1024..1279         0.922s    2.457s   22.704s    3.528s     29.611s
+771a7eb4   localhost              256..511           1.927s    2.559s   22.431s    2.806s     29.723s
+b566100b   localhost              1280..1535         2.121s    2.904s   25.355s    1.444s     31.824s
+[RECOVERY] retries=0 recovery_time=0.000s
