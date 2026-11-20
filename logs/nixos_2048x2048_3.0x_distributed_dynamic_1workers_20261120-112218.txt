@@ -1,0 +1,48 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 3.0x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_3.0x.png
+Execution time: 22.967789s
+Throughput: 182616.798 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             1
+T_seq                    1.497s
+T_run                    22.968s
+Speedup                  0.065x
+Efficiency               6.52% (P=1)
+Throughput               182616.80 input-pixels/s
+
+T_RUN DETAIL
+PHASE                             WALL TIME
+Task preparation                     0.000s
+Upload (all Workers)                 3.077s
+Pure compute (all Workers)           2.372s
+Download (all Workers)              16.857s
+Other                                0.644s
+Stitching                            0.018s
+T_run total                         22.968s
+
+WORKER PERFORMANCE
+WORKER                 TASKS    UPLOAD   COMPUTE   DOWNLOAD     OTHER    ACTIVE   AVG CPU   AVG RAM     IN MB    OUT MB  RETRY
+localhost                  8    3.077s    2.372s    16.857s    0.001s   22.306s     37.7%     76.8%    13.96   125.63      0
+
+TASK TIMINGS
+TASK       WORKER                 ROWS               UPLOAD   COMPUTE  DOWNLOAD     OTHER  TOTAL TIME
+5a41af55   localhost              1536..1791         2.671s    1.472s    8.917s    1.453s     14.513s
+a6651028   localhost              256..511           2.894s    1.260s   13.711s    1.836s     19.700s
+faa6bae8   localhost              512..767           2.821s    1.780s   15.130s    1.240s     20.972s
+ef64d5dd   localhost              768..1023          2.272s    0.626s   15.098s    3.081s     21.076s
+2b35cbb5   localhost              1280..1535         2.802s    1.867s   16.060s    1.164s     21.892s
+6151a61d   localhost              0..255             2.615s    1.434s   16.334s    1.793s     22.176s
+e42419ae   localhost              1024..1279         2.520s    2.119s   16.723s    1.282s     22.644s
+956640c5   localhost              1792..2047         1.175s    0.585s   18.567s    2.613s     22.939s
+[RECOVERY] retries=0 recovery_time=0.000s

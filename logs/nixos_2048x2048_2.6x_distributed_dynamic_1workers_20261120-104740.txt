@@ -1,0 +1,48 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 2.6x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_2.6x.png
+Execution time: 21.734485s
+Throughput: 192979.224 input-pixels/s
+
+T_RUN PHASES (these sequential phases sum to T_run)
+PHASE                           WALL TIME
+Task preparation                   0.000s
+Parallel execution wall           21.721s
+Stitching                          0.013s
+T_run total                       21.734s
+Upload, pure compute, and download wall times are reported in the Worker table; they overlap during parallel execution and must not be added to the phases above.
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             1
+T_seq                    1.182s
+T_run (wall-clock)       21.734s
+Speedup                  0.054x
+Efficiency               5.44% (P=1)
+Throughput               192979.22 input-pixels/s
+
+WORKER PERFORMANCE
+WORKER                 TASKS  UPLOAD WALL  COMPUTE WALL  DOWNLOAD WALL  ACTIVE WALL   AVG CPU   AVG RAM     IN MB    OUT MB  RETRY
+localhost                  8       3.518s        2.581s        13.581s      20.187s     43.2%     79.2%    13.96    94.38      0
+  Phase wall times merge overlapping task intervals; do not add phase columns together.
+
+TASK TIMINGS
+TASK       WORKER                 ROWS               UPLOAD   COMPUTE  DOWNLOAD     OTHER  TOTAL TIME
+Task TOTAL TIME is per-task elapsed duration; task rows can overlap.
+2dda484a   localhost              256..511           2.422s    1.977s    5.107s    2.296s     11.801s
+305d4df5   localhost              512..767           2.825s    1.915s    7.752s    1.975s     14.468s
+133c10d3   localhost              1280..1535         2.839s    2.140s   13.000s    2.194s     20.174s
+e42963cf   localhost              1536..1791         2.849s    2.049s   13.125s    2.275s     20.299s
+23f7bef6   localhost              768..1023          3.243s    1.178s   14.137s    2.655s     21.213s
+136715a1   localhost              1024..1279         1.529s    2.501s   14.371s    3.201s     21.603s
+d8d0c1ad   localhost              1792..2047         2.938s    2.308s   14.410s    1.951s     21.607s
+332c5f56   localhost              0..255             2.191s    2.325s   14.891s    2.312s     21.719s
+[RECOVERY] retries=0 recovery_time=0.000s

@@ -45,6 +45,28 @@ def interval_union_seconds(intervals: list[tuple[float, float]]) -> float:
     return total + end - start
 
 
+def subtract_intervals(intervals: list[tuple[float, float]], occupied: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Return portions of intervals not already covered by occupied intervals."""
+    merged_occupied = []
+    for start, end in sorted(occupied):
+        if end <= start: continue
+        if merged_occupied and start <= merged_occupied[-1][1]:
+            merged_occupied[-1] = (merged_occupied[-1][0], max(merged_occupied[-1][1], end))
+        else:
+            merged_occupied.append((start, end))
+    remaining = []
+    for start, end in intervals:
+        cursor = start
+        for block_start, block_end in merged_occupied:
+            if block_end <= cursor: continue
+            if block_start >= end: break
+            if block_start > cursor: remaining.append((cursor, min(block_start, end)))
+            cursor = max(cursor, block_end)
+            if cursor >= end: break
+        if cursor < end: remaining.append((cursor, end))
+    return remaining
+
+
 def worker_info(host: str, port: int) -> dict:
     with socket.create_connection((host, port), timeout=3) as sock:
         send_json(sock, {"action": "info"})
@@ -53,7 +75,7 @@ def worker_info(host: str, port: int) -> dict:
 
 def discover_workers(timeout: float = 1.5) -> list[dict]:
     found: dict[str, dict] = {}
-    interfaces: list[tuple[str, str]] = []
+    broadcasts = {"255.255.255.255"}
     for addresses in psutil.net_if_addrs().values():
         for address in addresses:
             if address.family != socket.AF_INET or not address.address or not address.netmask:
@@ -63,29 +85,29 @@ def discover_workers(timeout: float = 1.5) -> list[dict]:
                 if ip.is_loopback or ip.is_link_local:
                     continue
                 network = ipaddress.IPv4Network(f"{address.address}/{address.netmask}", strict=False)
-                interfaces.append((address.address, str(network.broadcast_address)))
+                broadcasts.add(str(network.broadcast_address))
             except ValueError:
                 continue
-    targets = {(None, "255.255.255.255"), *interfaces}
-    for local_ip, broadcast_ip in targets:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                sock.settimeout(0.2)
-                if local_ip:
-                    sock.bind((local_ip, 0))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(("", 0))
+        for broadcast_ip in sorted(broadcasts):
+            try:
                 sock.sendto(b"DISCOVER_UPSCAYL_WORKERS_V1", (broadcast_ip, DISCOVERY_PORT))
-                deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline:
-                    try:
-                        raw, addr = sock.recvfrom(2048)
-                        info = json.loads(raw.decode())
-                        if info.get("protocol") == PROTOCOL_VERSION:
-                            found[addr[0]] = info | {"ip": addr[0]}
-                    except socket.timeout:
-                        continue
-        except OSError as exc:
-            print(f"[DISCOVERY] broadcast {broadcast_ip} via {local_ip or 'default route'} failed: {exc}")
+            except OSError as exc:
+                print(f"[DISCOVERY] broadcast {broadcast_ip} failed: {exc}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            sock.settimeout(max(0.05, deadline - time.monotonic()))
+            try:
+                raw, addr = sock.recvfrom(2048)
+                info = json.loads(raw.decode())
+                if info.get("protocol") == PROTOCOL_VERSION:
+                    found[addr[0]] = info | {"ip": addr[0]}
+            except socket.timeout:
+                break
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                print(f"[DISCOVERY] invalid response: {exc}")
     return list(found.values())
 
 
@@ -353,19 +375,10 @@ def main() -> None:
     print(f"[MASTER] status={status} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
     throughput = h * w / elapsed if elapsed else 0.0
     report = ["Distributed Image Upscaler - Benchmark Report", f"Master: {socket.gethostname()}", f"Input: {args.input}", f"Resolution: {w}x{h}", f"Scale: {args.scale}x", f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}", f"Output: {path}", f"Execution time: {elapsed:.6f}s", f"Throughput: {throughput:.3f} input-pixels/s"]
-    if args.mode != "sequential":
-        phase_rows = [("Task preparation", task_preparation_seconds), ("Parallel execution wall", parallel_wall_seconds), ("Stitching", stitching_seconds), ("T_run total", elapsed)]
-        print("\n[T_RUN PHASES]")
-        print(f"{'PHASE':<28} {'WALL TIME':>12}")
-        report.extend(["", "T_RUN PHASES (these sequential phases sum to T_run)", f"{'PHASE':<28} {'WALL TIME':>12}"])
-        for phase, seconds in phase_rows:
-            line = f"{phase:<28} {seconds:>11.3f}s"
-            print(line); report.append(line)
-        report.append("Upload, pure compute, and download wall times are reported in the Worker table; they overlap during parallel execution and must not be added to the phases above.")
     parallelism = planned_worker_count if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
     speedup = baseline_seconds / elapsed if baseline_seconds is not None and elapsed else None
     efficiency = speedup / max(1, parallelism) * 100 if speedup is not None else None
-    analysis_rows = [("Execution mode", args.mode), ("Scheduler", args.scheduler), ("Worker nodes", str(planned_worker_count)), ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"), ("T_run (wall-clock)", f"{elapsed:.3f}s"), ("Speedup", f"{speedup:.3f}x" if speedup is not None else "n/a"), ("Efficiency", f"{efficiency:.2f}% (P={parallelism})" if efficiency is not None else "n/a"), ("Throughput", f"{throughput:.2f} input-pixels/s")]
+    analysis_rows = [("Execution mode", args.mode), ("Scheduler", args.scheduler), ("Worker nodes", str(planned_worker_count)), ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"), ("T_run", f"{elapsed:.3f}s"), ("Speedup", f"{speedup:.3f}x" if speedup is not None else "n/a"), ("Efficiency", f"{efficiency:.2f}% (P={parallelism})" if efficiency is not None else "n/a"), ("Throughput", f"{throughput:.2f} input-pixels/s")]
     print("\n[OVERALL ANALYSIS]")
     print(f"{'METRIC':<24} VALUE")
     report.extend(["", "OVERALL ANALYSIS", f"{'METRIC':<24} VALUE"])
@@ -373,9 +386,32 @@ def main() -> None:
         line = f"{label:<24} {value}"
         print(line); report.append(line)
     if args.mode != "sequential":
-        print("Upload/compute/download are detailed under Worker phases; they overlap and are included inside Parallel execution wall.")
+        all_upload_intervals = [interval for stat in worker_stats.values() for interval in stat["upload_intervals"]]
+        all_compute_intervals = [interval for stat in worker_stats.values() for interval in stat["compute_intervals"]]
+        all_download_intervals = [interval for stat in worker_stats.values() for interval in stat["download_intervals"]]
+        all_active_intervals = [interval for stat in worker_stats.values() for interval in stat["active_intervals"]]
+        all_upload = interval_union_seconds(all_upload_intervals)
+        all_compute = interval_union_seconds(subtract_intervals(all_compute_intervals, all_upload_intervals))
+        all_download = interval_union_seconds(subtract_intervals(all_download_intervals, all_upload_intervals + all_compute_intervals))
+        run_other = max(0.0, elapsed - task_preparation_seconds - stitching_seconds - all_upload - all_compute - all_download)
+        phase_rows = [
+            ("Task preparation", task_preparation_seconds),
+            ("Upload (all Workers)", all_upload),
+            ("Pure compute (all Workers)", all_compute),
+            ("Download (all Workers)", all_download),
+            ("Other", run_other),
+            ("Stitching", stitching_seconds),
+            ("T_run total", elapsed),
+        ]
+        print("\n[T_RUN DETAIL]")
+        phase_header = f"{'PHASE':<30} {'WALL TIME':>12}"
+        print(phase_header)
+        report.extend(["", "T_RUN DETAIL", phase_header])
+        for phase, seconds in phase_rows:
+            line = f"{phase:<30} {seconds:>11.3f}s"
+            print(line); report.append(line)
     if worker_stats:
-        header = f"{'WORKER':<22} {'TASKS':>5} {'UPLOAD WALL':>12} {'COMPUTE WALL':>13} {'DOWNLOAD WALL':>14} {'ACTIVE WALL':>12} {'AVG CPU':>9} {'AVG RAM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
+        header = f"{'WORKER':<22} {'TASKS':>5} {'UPLOAD':>9} {'COMPUTE':>9} {'DOWNLOAD':>10} {'OTHER':>9} {'ACTIVE':>9} {'AVG CPU':>9} {'AVG RAM':>9} {'IN MB':>9} {'OUT MB':>9} {'RETRY':>6}"
         print("\n[WORKER ANALYSIS]")
         print(header)
         report.extend(["", "WORKER PERFORMANCE", header])
@@ -383,15 +419,15 @@ def main() -> None:
             avg_cpu = sum(stat["cpu"]) / len(stat["cpu"]) if stat["cpu"] else 0.0
             avg_mem = sum(stat["memory"]) / len(stat["memory"]) if stat["memory"] else 0.0
             upload_wall = interval_union_seconds(stat["upload_intervals"])
-            compute_wall = interval_union_seconds(stat["compute_intervals"])
-            download_wall = interval_union_seconds(stat["download_intervals"])
+            compute_wall = interval_union_seconds(subtract_intervals(stat["compute_intervals"], stat["upload_intervals"]))
+            download_wall = interval_union_seconds(subtract_intervals(stat["download_intervals"], stat["upload_intervals"] + stat["compute_intervals"]))
             worker_wall = interval_union_seconds(stat["active_intervals"])
-            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {upload_wall:>11.3f}s {compute_wall:>12.3f}s {download_wall:>13.3f}s {worker_wall:>11.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
+            worker_other = max(0.0, worker_wall - upload_wall - compute_wall - download_wall)
+            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {upload_wall:>8.3f}s {compute_wall:>8.3f}s {download_wall:>9.3f}s {worker_other:>8.3f}s {worker_wall:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>8.2f} {stat['retries']:>6}"
             print(row); report.append(row)
-            report.append("  Phase wall times merge overlapping task intervals; do not add phase columns together.")
     task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'UPLOAD':>9} {'COMPUTE':>9} {'DOWNLOAD':>9} {'OTHER':>9} {'TOTAL TIME':>11}"
     print("\n[TASK TIMINGS]"); print(task_header)
-    report.extend(["", "TASK TIMINGS", task_header, "Task TOTAL TIME is per-task elapsed duration; task rows can overlap."])
+    report.extend(["", "TASK TIMINGS", task_header])
     for item in task_details:
         row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {item['upload']:>8.3f}s {item['compute']:>8.3f}s {item['download']:>8.3f}s {item['other']:>8.3f}s {item['total']:>10.3f}s"
         print(row); report.append(row)
