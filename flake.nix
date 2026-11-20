@@ -8,7 +8,7 @@
       devShells = forEachSystem (pkgs: {
         default = pkgs.mkShell {
           packages = [ (pkgs.python314.withPackages (ps: with ps; [ numpy opencv4 pillow psutil ])) ];
-          shellHook = ''export PYTHONPATH="$PWD:$PYTHONPATH"; echo "Python distributed-upscaler devShell ready"'';
+          shellHook = ''export PYTHONPATH="$PWD:$PYTHONPATH"; echo "Python distributed NLM denoiser devShell ready"'';
         };
       });
     };

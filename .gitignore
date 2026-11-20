@@ -4,7 +4,8 @@ __pycache__/
 *.pyc
 
 # Generated image outputs and local Nix build links
-after/*
+input/*-before.png
+output/*
 result
 result-*
 

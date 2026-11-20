@@ -16,13 +16,13 @@ from protocol import recv_bytes, recv_json, send_bytes, send_json
 
 
 def _process(
-    payload: bytes, shape: tuple[int, ...], scale: float,
-    operation: str, nlm_search_window: int,
+    payload: bytes, shape: tuple[int, ...],
+    nlm_search_window: int, nlm_h: float, nlm_h_color: float,
 ) -> tuple[bytes, tuple[int, ...], str, float, tuple[float, float]]:
     started = time.perf_counter()
     started_epoch = time.time()
     image = np.frombuffer(payload, dtype=np.uint8).reshape(shape).copy()
-    result = process_slice(image, scale, operation, nlm_search_window)
+    result = process_slice(image, nlm_search_window, nlm_h, nlm_h_color)
     result_bytes = np.ascontiguousarray(result).tobytes()
     return result_bytes, result.shape, checksum(result), time.perf_counter() - started, (started_epoch, time.time())
 
@@ -34,10 +34,14 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
         try:
             request = recv_json(conn)
             if request.get("action") == "info":
-                send_json(conn, {"ok": True, "host": socket.gethostname(), "cores": multiprocessing.cpu_count(), "slots": multiprocessing.cpu_count(), "operations": ["upscale", "nlm"]})
+                send_json(conn, {"ok": True, "host": socket.gethostname(), "cores": multiprocessing.cpu_count(), "slots": multiprocessing.cpu_count(), "operations": ["nlm"], "nlm_task_schema": 2})
                 return
             if request.get("version") != PROTOCOL_VERSION:
                 raise ValueError("unsupported protocol version")
+            if request.get("operation") != "nlm":
+                raise ValueError("unsupported or missing image operation; this Worker supports NLM only")
+            if request.get("nlm_task_schema") != 2:
+                raise ValueError("incompatible NLM task schema; update the Master")
             if not capacity.acquire(blocking=False):
                 send_json(conn, {"ok": False, "busy": True, "retry_after": 0.5, "error": "all worker process slots are busy"})
                 print(f"[WORKER][BUSY] rejected temporarily master={address[0]} task={request.get('task_id')}", flush=True)
@@ -52,11 +56,12 @@ def handle(conn: socket.socket, address: tuple[str, int], pool: concurrent.futur
                 raise ValueError("input checksum mismatch")
             started = time.perf_counter()
             started_epoch = time.time()
-            operation = request.get("operation", "upscale")
-            nlm_search_window = int(request.get("nlm_search_window", 21))
+            nlm_search_window = int(request["nlm_search_window"])
+            nlm_h = float(request["nlm_h"])
+            nlm_h_color = float(request["nlm_h_color"])
             future = pool.submit(
-                _process, payload, tuple(request["shape"]), float(request["scale"]),
-                operation, nlm_search_window,
+                _process, payload, tuple(request["shape"]),
+                nlm_search_window, nlm_h, nlm_h_color,
             )
             samples: list[tuple[float, float]] = []
             proc = psutil.Process()
@@ -100,7 +105,7 @@ def run(bind: str, port: int, processes: int) -> None:
                 try:
                     data, addr = udp.recvfrom(1024)
                     if data == b"DISCOVER_UPSCAYL_WORKERS_V1":
-                        info = {"host": socket.gethostname(), "port": port, "cores": processes, "protocol": PROTOCOL_VERSION, "operations": ["upscale", "nlm"]}
+                        info = {"host": socket.gethostname(), "port": port, "cores": processes, "protocol": PROTOCOL_VERSION, "operations": ["nlm"], "nlm_task_schema": 2}
                         udp.sendto(__import__("json").dumps(info).encode(), addr)
                 except OSError:
                     break

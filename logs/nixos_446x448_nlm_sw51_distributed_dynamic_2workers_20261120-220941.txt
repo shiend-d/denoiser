@@ -1,0 +1,55 @@
+Distributed Image Processing - Benchmark Report
+Master: nixos
+Input: before/prabowo.jpg
+Resolution: 446x448
+Operation: NLM denoising (search window=51, h=3, hColor=3, template=7)
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/prabowo_nlm_sw51.png
+Execution time: 3.228342s
+Throughput: 61891.825 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Operation                NLM denoising (search window=51, h=3, hColor=3, template=7)
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             2
+T_seq                    7.024s
+T_run                    3.228s
+Speedup                  2.176x
+Efficiency               108.78% (P=2)
+Throughput               61891.82 input-pixels/s
+
+T_RUN PHASE WALL TIMES - NETWORK EXCLUDES COMPUTE OVERLAP
+PHASE                             WALL TIME
+Network (all Workers)                0.567s
+Pure compute (all Workers)           2.572s
+Other (whole job)                    0.089s
+T_run total                          3.228s
+
+WORKER PERFORMANCE
+WORKER                 TASKS FAILED    NETWORK   COMPUTE OTHER (WORKER)    ACTIVE   AVG CPU   AVG RAM   TASK MB  RESULT MB  RETRY
+localhost                  8      0     0.515s    2.097s         0.278s    2.890s     36.1%     76.0%     0.51      0.51      0
+DESKTOP-F40ABI3            8      0     0.567s    2.572s         0.000s    3.139s     35.9%     41.1%     0.63      0.63      0
+
+TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP
+TASK         WORKER                 REGION                      STATUS                          TASK MB  RESULT MB    NETWORK  NETWORK MB/S   COMPUTE OTHER (TASK)  TOTAL TIME
+12/16        localhost              x=384..445,y=256..383       SUCCESS                           0.05      0.05     0.511s          0.19    1.041s       0.341s      1.893s
+16/16        localhost              x=384..445,y=384..447       SUCCESS                           0.02      0.02     0.479s          0.10    0.785s       0.711s      1.975s
+13/16        DESKTOP-F40ABI3        x=0..127,y=384..447         SUCCESS                           0.04      0.04     0.494s          0.17    1.254s       0.297s      2.044s
+15/16        DESKTOP-F40ABI3        x=256..383,y=384..447       SUCCESS                           0.05      0.05     0.432s          0.23    1.313s       0.301s      2.047s
+8/16         localhost              x=384..445,y=128..255       SUCCESS                           0.05      0.05     0.511s          0.19    1.098s       0.563s      2.172s
+4/16         localhost              x=384..445,y=0..127         SUCCESS                           0.04      0.04     0.515s          0.16    0.762s       1.027s      2.304s
+14/16        localhost              x=128..255,y=384..447       SUCCESS                           0.05      0.05     0.479s          0.21    1.288s       0.645s      2.411s
+1/16         DESKTOP-F40ABI3        x=0..127,y=0..127           SUCCESS                           0.07      0.07     0.519s          0.28    1.898s       0.246s      2.663s
+3/16         DESKTOP-F40ABI3        x=256..383,y=0..127         SUCCESS                           0.09      0.09     0.486s          0.35    2.171s       0.234s      2.892s
+6/16         localhost              x=128..255,y=128..255       SUCCESS                           0.10      0.10     0.511s          0.40    1.870s       0.532s      2.914s
+10/16        localhost              x=128..255,y=256..383       SUCCESS                           0.10      0.10     0.511s          0.40    1.998s       0.471s      2.980s
+2/16         localhost              x=128..255,y=0..127         SUCCESS                           0.09      0.09     0.515s          0.33    1.606s       0.863s      2.984s
+5/16         DESKTOP-F40ABI3        x=0..127,y=128..255         SUCCESS                           0.09      0.09     0.519s          0.33    2.219s       0.347s      3.085s
+7/16         DESKTOP-F40ABI3        x=256..383,y=128..255       SUCCESS                           0.10      0.10     0.527s          0.39    2.469s       0.221s      3.217s
+9/16         DESKTOP-F40ABI3        x=0..127,y=256..383         SUCCESS                           0.09      0.09     0.519s          0.33    2.189s       0.509s      3.217s
+11/16        DESKTOP-F40ABI3        x=256..383,y=256..383       SUCCESS                           0.10      0.10     0.563s          0.36    2.400s       0.263s      3.226s
+[RECOVERY] retries=0 recovery_time=0.000s

@@ -4,6 +4,7 @@ import argparse
 import concurrent.futures
 import ipaddress
 import json
+import math
 import multiprocessing
 import socket
 import time
@@ -13,8 +14,12 @@ from pathlib import Path
 import numpy as np
 import psutil
 
-from config import DEFAULT_OVERLAP, DEFAULT_PORT, DEFAULT_TILE_SIZE, DISCOVERY_PORT, MAX_SCALE, MIN_SCALE, PROTOCOL_VERSION, SOCKET_TIMEOUT
-from image_pipeline import checksum, process_slice, read_image, save_image
+from config import (
+    DEFAULT_NLM_H, DEFAULT_NLM_H_COLOR, DEFAULT_NLM_SEARCH_WINDOW,
+    DEFAULT_NOISE_SEED, DEFAULT_NOISE_SIGMA, DEFAULT_OVERLAP, DEFAULT_PORT,
+    DEFAULT_TILE_SIZE, DISCOVERY_PORT, PROTOCOL_VERSION, SOCKET_TIMEOUT,
+)
+from image_pipeline import add_gaussian_noise, checksum, process_slice, read_image, save_image
 from protocol import recv_bytes, recv_json, send_bytes, send_json
 
 
@@ -22,11 +27,11 @@ class WorkerBusyError(RuntimeError):
     """Worker explicitly rejected a task because all of its slots are occupied."""
 
 
-def scale_arg(value: str) -> float:
-    scale = float(value)
-    if not MIN_SCALE <= scale <= MAX_SCALE:
-        raise argparse.ArgumentTypeError("scale must be between 1 and 10")
-    return scale
+def noise_sigma_arg(value: str) -> float:
+    sigma = float(value)
+    if not 0 < sigma <= 100:
+        raise argparse.ArgumentTypeError("noise sigma must be greater than 0 and at most 100")
+    return sigma
 
 
 def interval_union_seconds(intervals: list[tuple[float, float]]) -> float:
@@ -159,8 +164,8 @@ def discover_workers(timeout: float = 1.5) -> list[dict]:
 
 
 def remote_task(
-    worker: dict, task: dict, scale: float, operation: str,
-    nlm_search_window: int, timeout: float = SOCKET_TIMEOUT,
+    worker: dict, task: dict, nlm_search_window: int,
+    nlm_h: float, nlm_h_color: float, timeout: float = SOCKET_TIMEOUT,
 ) -> tuple[dict, np.ndarray]:
     image = task["image"]
     task_started = time.perf_counter()
@@ -174,8 +179,9 @@ def remote_task(
         sock.settimeout(timeout)
         send_json(sock, {
             "version": PROTOCOL_VERSION, "task_id": task["id"],
-            "shape": list(image.shape), "scale": scale,
-            "operation": operation, "nlm_search_window": nlm_search_window,
+            "shape": list(image.shape), "operation": "nlm", "nlm_task_schema": 2,
+            "nlm_search_window": nlm_search_window,
+            "nlm_h": nlm_h, "nlm_h_color": nlm_h_color,
             "checksum": checksum(image),
         })
         acknowledgement = recv_json(sock)
@@ -229,11 +235,11 @@ def empty_worker_stats(host: str) -> dict:
     }
 
 
-def local_piece(args: tuple[bytes, tuple[int, ...], float, str, int]) -> np.ndarray:
-    raw, shape, scale, operation, nlm_search_window = args
+def local_piece(args: tuple[bytes, tuple[int, ...], int, float, float]) -> np.ndarray:
+    raw, shape, nlm_search_window, nlm_h, nlm_h_color = args
     return process_slice(
         np.frombuffer(raw, dtype=np.uint8).reshape(shape).copy(),
-        scale, operation, nlm_search_window,
+        nlm_search_window, nlm_h, nlm_h_color,
     )
 
 
@@ -263,128 +269,106 @@ def make_tile_tasks(image: np.ndarray, tile_size: int, overlap: int) -> tuple[li
     return tasks, columns, rows
 
 
-def crop_tile_core(part: np.ndarray, task: dict, scale: float) -> np.ndarray:
-    """Crop context from a processed tile using global output coordinates."""
-    out_x0 = round(task["x"] * scale)
-    out_x1 = round(task["x_end"] * scale)
-    out_y0 = round(task["y"] * scale)
-    out_y1 = round(task["y_end"] * scale)
-    context_out_x0 = round(task["context_x0"] * scale)
-    context_out_y0 = round(task["context_y0"] * scale)
-    expected_width = out_x1 - out_x0
-    expected_height = out_y1 - out_y0
-    left = out_x0 - context_out_x0
-    top = out_y0 - context_out_y0
-    right = left + expected_width
-    bottom = top + expected_height
-
-    # cv2.resize rounds each tile's output dimensions independently. Correct a
-    # possible one-pixel rounding difference at the outer image boundaries.
-    if left < 0:
-        right -= left
-        left = 0
-    if top < 0:
-        bottom -= top
-        top = 0
-    if right > part.shape[1]:
-        left -= right - part.shape[1]
-        right = part.shape[1]
-    if bottom > part.shape[0]:
-        top -= bottom - part.shape[0]
-        bottom = part.shape[0]
-
-    core = part[top:bottom, left:right]
-    if core.shape[:2] != (expected_height, expected_width):
-        raise ValueError(
-            f"tile core shape mismatch: expected {(expected_height, expected_width)}, got {core.shape[:2]}"
-        )
+def crop_tile_core(part: np.ndarray, task: dict) -> np.ndarray:
+    """Remove the denoising context; NLM keeps input dimensions unchanged."""
+    left = task["x"] - task["context_x0"]
+    top = task["y"] - task["context_y0"]
+    width = task["x_end"] - task["x"]
+    height = task["y_end"] - task["y"]
+    core = part[top:top + height, left:left + width]
+    if core.shape[:2] != (height, width):
+        raise ValueError(f"tile core shape mismatch: expected {(height, width)}, got {core.shape[:2]}")
     return core
 
 
 def stitch_tile_pieces(
-    pieces: dict[tuple[int, int], np.ndarray], height: int, width: int, scale: float,
+    pieces: dict[tuple[int, int], np.ndarray], height: int, width: int,
 ) -> np.ndarray:
-    output = np.empty((round(height * scale), round(width * scale), 3), dtype=np.uint8)
+    output = np.empty((height, width, 3), dtype=np.uint8)
     for (tile_y, tile_x), part in pieces.items():
-        out_y = round(tile_y * scale)
-        out_x = round(tile_x * scale)
-        output[out_y:out_y + part.shape[0], out_x:out_x + part.shape[1]] = part
+        output[tile_y:tile_y + part.shape[0], tile_x:tile_x + part.shape[1]] = part
     return output
 
 
 def process_tiles_sequential(
-    image: np.ndarray, scale: float, tile_size: int, overlap: int,
-    operation: str, nlm_search_window: int,
+    image: np.ndarray, tile_size: int, overlap: int,
+    nlm_search_window: int, nlm_h: float, nlm_h_color: float,
 ) -> tuple[np.ndarray, int, int]:
     """Run the shared tile workload serially in the current single process."""
     height, width = image.shape[:2]
     tasks, columns, rows = make_tile_tasks(image, tile_size, overlap)
     pieces = {}
     for task in tasks:
-        processed = process_slice(task["image"], scale, operation, nlm_search_window)
-        pieces[(task["y"], task["x"])] = crop_tile_core(processed, task, scale)
-    return stitch_tile_pieces(pieces, height, width, scale), columns, rows
+        processed = process_slice(task["image"], nlm_search_window, nlm_h, nlm_h_color)
+        pieces[(task["y"], task["x"])] = crop_tile_core(processed, task)
+    return stitch_tile_pieces(pieces, height, width), columns, rows
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Distributed image processing coordinator")
+    parser = argparse.ArgumentParser(description="Distributed NLM image denoising coordinator")
     parser.add_argument("--input")
-    parser.add_argument("--operation", choices=("upscale", "nlm"), help="image operation to benchmark")
-    parser.add_argument("--scale", type=scale_arg)
-    parser.add_argument("--nlm-search-window", type=int, help="odd NLM search window; larger values take longer")
+    parser.add_argument("--noise-sigma", type=noise_sigma_arg, default=None, help="Gaussian noise standard deviation; default 20")
+    parser.add_argument("--noise-seed", type=int, default=DEFAULT_NOISE_SEED, help="fixed seed for repeatable noisy input")
+    parser.add_argument("--nlm-search-window", type=int, default=None, help="odd NLM search window; larger values take longer")
+    parser.add_argument("--nlm-h", type=float, default=DEFAULT_NLM_H, help="NLM luminance denoising strength")
+    parser.add_argument("--nlm-h-color", type=float, default=DEFAULT_NLM_H_COLOR, help="NLM color denoising strength")
     parser.add_argument("--mode", choices=("sequential", "local-parallel", "distributed"))
     parser.add_argument("--worker", action="append", default=[], metavar="HOST[:PORT]")
     parser.add_argument("--workers", type=int, help="limit discovered workers")
     parser.add_argument("--scheduler", choices=("dynamic", "static"), default="dynamic")
     parser.add_argument("--fault-tolerance", action=argparse.BooleanOptionalAction, default=None, help="retry failed tasks on another Worker")
     parser.add_argument("--tile-size", type=int, default=DEFAULT_TILE_SIZE, help="core width and height of each square image tile")
-    parser.add_argument("--output", default="after")
+    parser.add_argument("--output", default="output")
     args = parser.parse_args()
     if args.tile_size < 1:
         parser.error("--tile-size must be at least 1")
     if args.nlm_search_window is not None and (args.nlm_search_window < 7 or args.nlm_search_window % 2 == 0):
         parser.error("--nlm-search-window must be an odd integer of at least 7")
+    if not math.isfinite(args.nlm_h) or not math.isfinite(args.nlm_h_color) or args.nlm_h <= 0 or args.nlm_h_color <= 0:
+        parser.error("--nlm-h and --nlm-h-color must be finite and greater than 0")
+    if args.noise_seed < 0:
+        parser.error("--noise-seed must be 0 or greater")
     workers: list[dict] = []
     planned_worker_count = 0
     # No-argument launch is the guided terminal interface used for demos.
     if not args.input:
-        print("=== Distributed Image Processor ===")
+        print("=== Distributed NLM Image Denoiser ===")
         while True:
-            entered_path = input("Image path or filename in before/: ").strip()
+            entered_path = input("Image path or filename in input/: ").strip()
             candidate = Path(entered_path).expanduser()
             if candidate.is_file():
                 args.input = str(candidate)
                 break
-            before_candidate = Path("before") / candidate.name
-            if candidate.parent == Path(".") and before_candidate.is_file():
-                args.input = str(before_candidate)
+            input_candidate = Path("input") / candidate.name
+            if candidate.parent == Path(".") and input_candidate.is_file():
+                args.input = str(input_candidate)
                 break
-            print("File not found. Enter a valid path or a filename located in before/.")
-        if args.operation is None:
-            print("\nChoose image operation:\n  1) Upscale: enlarge and enhance the image\n  2) NLM: denoise while keeping the original dimensions")
-            operations = {"1": "upscale", "2": "nlm"}
-            while args.operation not in operations.values():
-                args.operation = operations.get(input("Operation [1-2]: ").strip())
-        if args.operation == "upscale":
-            while args.scale is None:
-                try: args.scale = scale_arg(input("Upscale factor (1.0-10.0): ").strip())
-                except (ValueError, argparse.ArgumentTypeError) as exc: print(f"Invalid scale: {exc}")
-        else:
-            args.scale = 1.0
-            if args.nlm_search_window is None:
-                while True:
-                    entered = input("NLM search window [21, odd number at least 7; larger is slower]: ").strip()
-                    if not entered:
-                        args.nlm_search_window = 21
+            print("File not found. Enter a valid path or a filename located in input/.")
+        if Path(args.input).stem.endswith("-before"):
+            parser.error("choose the original image in input/, not a generated -before image")
+        while args.noise_sigma is None:
+            entered = input(f"Gaussian noise sigma [default {DEFAULT_NOISE_SIGMA}; larger means more visible noise]: ").strip()
+            if not entered:
+                args.noise_sigma = DEFAULT_NOISE_SIGMA
+                break
+            try:
+                args.noise_sigma = noise_sigma_arg(entered)
+            except (ValueError, argparse.ArgumentTypeError) as exc:
+                print(f"Invalid noise level: {exc}")
+        if args.nlm_search_window is None:
+            while True:
+                entered = input(f"NLM search window [default {DEFAULT_NLM_SEARCH_WINDOW}, odd >= 7]: ").strip()
+                if not entered:
+                    args.nlm_search_window = DEFAULT_NLM_SEARCH_WINDOW
+                    break
+                try:
+                    candidate_window = int(entered)
+                    if candidate_window >= 7 and candidate_window % 2 == 1:
+                        args.nlm_search_window = candidate_window
                         break
-                    try:
-                        candidate_window = int(entered)
-                        if candidate_window >= 7 and candidate_window % 2 == 1:
-                            args.nlm_search_window = candidate_window
-                            break
-                    except ValueError:
-                        pass
-                    print("Enter an odd integer of at least 7.")
+                except ValueError:
+                    pass
+                print("Enter an odd integer of at least 7.")
         print("\nChoose execution mode:\n  1) Sequential baseline: one process on Master\n  2) Local parallel: multiple processes on Master\n  3) Distributed: selected Workers process image tiles concurrently")
         modes = {"1": "sequential", "2": "local-parallel", "3": "distributed"}
         while args.mode not in modes.values(): args.mode = modes.get(input("Mode [1-3]: ").strip())
@@ -413,21 +397,11 @@ def main() -> None:
             args.fault_tolerance = input("Enable fault tolerance? [y/N]: ").strip().lower() in ("y", "yes")
             print("[FAULT TOLERANCE] Y: failed tasks retry on another Worker, with waits for busy slots. N: no retry; processing continues and missing regions are saved in magenta.")
         print()
-    else:
-        args.operation = args.operation or "upscale"
-        if args.operation == "nlm":
-            if args.scale is not None and args.scale != 1.0:
-                parser.error("--scale must be 1.0 or omitted when --operation nlm is selected")
-            args.scale = 1.0
-            args.nlm_search_window = args.nlm_search_window or 21
-        elif args.scale is None:
-            parser.error("--scale is required for --operation upscale")
-    if args.operation == "upscale":
-        args.nlm_search_window = args.nlm_search_window or 21
-    tile_overlap = max(
-        DEFAULT_OVERLAP,
-        args.nlm_search_window // 2 + 7 // 2 if args.operation == "nlm" else DEFAULT_OVERLAP,
-    )
+    if args.noise_sigma is None:
+        args.noise_sigma = DEFAULT_NOISE_SIGMA
+    if args.nlm_search_window is None:
+        args.nlm_search_window = DEFAULT_NLM_SEARCH_WINDOW
+    tile_overlap = max(DEFAULT_OVERLAP, args.nlm_search_window // 2 + 7 // 2)
     args.mode = args.mode or "distributed"
     # Discovery is setup and must not be included in T_run.
     if args.mode == "distributed":
@@ -446,27 +420,43 @@ def main() -> None:
             parser.error("no Workers discovered; start worker.py before launching Master")
         planned_worker_count = len(workers)
         all_workers = list(workers)
-        if args.operation not in {"upscale", "nlm"}:
-            parser.error(f"unsupported image operation: {args.operation}")
-        unsupported = [w for w in workers if args.operation not in w.get("operations", ["upscale"])]
+        unsupported = [
+            w for w in workers
+            if "nlm" not in w.get("operations", []) or w.get("nlm_task_schema") != 2
+        ]
         if unsupported:
             names = ", ".join(f"{w['host']}@{w['ip']}" for w in unsupported)
-            parser.error(f"Workers {names} do not advertise operation '{args.operation}'; update worker.py and restart them")
+            parser.error(f"Workers {names} have an incompatible task format; copy the latest worker.py and image_pipeline.py there, then restart them")
         print("[MASTER] Selected Workers: " + ", ".join(f"{w['host']}@{w['ip']}" for w in workers))
-    image = read_image(args.input)
+    source_path = Path(args.input).expanduser()
+    if not source_path.is_file() and source_path.parent == Path("."):
+        source_path = Path("input") / source_path.name
+    if not source_path.is_file():
+        parser.error(f"image not found: {args.input}; choose a file in input/ or provide its path")
+    if source_path.stem.endswith("-before"):
+        parser.error("choose the original image, not a generated -before image")
+    original_path = source_path
+    original_image = read_image(original_path)
+    noise_preparation_started = time.perf_counter()
+    image = add_gaussian_noise(original_image, args.noise_sigma, args.noise_seed)
+    before_path = Path("input") / f"{original_path.stem}-before.png"
+    save_image(before_path, image)
+    noise_preparation_seconds = time.perf_counter() - noise_preparation_started
+    args.input = str(before_path)
     h, w, _ = image.shape
-    operation_description = (
-        f"NLM search_window={args.nlm_search_window}"
-        if args.operation == "nlm" else f"upscale scale={args.scale}"
+    print(
+        f"[INPUT] original={original_path} noisy={before_path} {w}x{h} "
+        f"sigma={args.noise_sigma:g} seed={args.noise_seed} "
+        f"noise_prep={noise_preparation_seconds:.3f}s"
     )
-    print(f"[MASTER] {args.input} {w}x{h} operation={operation_description} mode={args.mode}")
+    print(f"[MASTER] NLM search_window={args.nlm_search_window} h={args.nlm_h:g} hColor={args.nlm_h_color:g} mode={args.mode}")
     baseline_seconds = None
     if args.mode != "sequential":
         print("[BENCHMARK] Measuring single-process baseline using the same image tiles...")
         baseline_started = time.perf_counter()
         sequential_result, baseline_columns, baseline_rows = process_tiles_sequential(
-            image, args.scale, args.tile_size, tile_overlap,
-            args.operation, args.nlm_search_window,
+            image, args.tile_size, tile_overlap, args.nlm_search_window,
+            args.nlm_h, args.nlm_h_color,
         )
         baseline_seconds = time.perf_counter() - baseline_started
         print(
@@ -497,9 +487,11 @@ def main() -> None:
         )
         pieces = {}
         for task in tasks:
-            processed = process_slice(task["image"], args.scale, args.operation, args.nlm_search_window)
-            pieces[(task["y"], task["x"])] = crop_tile_core(processed, task, args.scale)
-        result = stitch_tile_pieces(pieces, h, w, args.scale)
+            processed = process_slice(
+                task["image"], args.nlm_search_window, args.nlm_h, args.nlm_h_color
+            )
+            pieces[(task["y"], task["x"])] = crop_tile_core(processed, task)
+        result = stitch_tile_pieces(pieces, h, w)
     else:
         preparation_started = time.perf_counter()
         process_slots = (sum(max(1, int(worker.get("slots", worker.get("cores", 1)))) for worker in workers)
@@ -519,11 +511,11 @@ def main() -> None:
                 futures = {
                     pool.submit(
                         local_piece,
-                        (t["image"].tobytes(), t["image"].shape, args.scale, args.operation, args.nlm_search_window),
+                        (t["image"].tobytes(), t["image"].shape, args.nlm_search_window, args.nlm_h, args.nlm_h_color),
                     ): t for t in tasks
                 }
                 for f, t in futures.items():
-                    pieces[(t["y"], t["x"])] = crop_tile_core(f.result(), t, args.scale)
+                    pieces[(t["y"], t["x"])] = crop_tile_core(f.result(), t)
         else:
             print("[MASTER] workers=" + ", ".join(f"{w['host']}@{w['ip']}({w.get('cores', 1)} processes)" for w in workers))
             pending_tasks = list(tasks)
@@ -544,7 +536,7 @@ def main() -> None:
                     task.setdefault("assigned_worker", worker["host"])
                     task.setdefault("assigned_worker_ip", worker["ip"])
                     active[pool.submit(
-                        remote_task, worker, task, args.scale, args.operation, args.nlm_search_window
+                        remote_task, worker, task, args.nlm_search_window, args.nlm_h, args.nlm_h_color
                     )] = (worker, task)
                 if args.scheduler == "static":
                     assignments = [[] for _ in slots]
@@ -599,7 +591,7 @@ def main() -> None:
                                         print(retry_line); failure_events.append(retry_line)
                                         try:
                                             response, part = remote_task(
-                                                candidate, task, args.scale, args.operation, args.nlm_search_window
+                                                candidate, task, args.nlm_search_window, args.nlm_h, args.nlm_h_color
                                             )
                                             worker = candidate; recovered = True; retried = True
                                             break
@@ -682,7 +674,7 @@ def main() -> None:
                             detail["other"] = task_other
                             task_details.append(detail)
                             print(f"[TASK] {task['label']} -> {worker['host']} tile={region} connect={detail['connect']:.3f}s network={detail['network']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s task_data={detail['bytes_in']/1e6:.2f}MB result_data={detail['bytes_out']/1e6:.2f}MB")
-                            pieces[(task["y"], task["x"])] = crop_tile_core(part, task, args.scale)
+                            pieces[(task["y"], task["x"])] = crop_tile_core(part, task)
                             completed += 1
                         if args.scheduler == "dynamic" and pending_tasks and slots:
                             submit(worker if worker in slots else slots[0], pending_tasks.pop(0))
@@ -697,31 +689,59 @@ def main() -> None:
         parallel_wall_seconds = time.perf_counter() - parallel_started
         stitching_started = time.perf_counter()
         if failed_tasks:
-            result = np.full((round(h * args.scale), round(w * args.scale), 3), (255, 0, 255), dtype=np.uint8)
+            result = np.full((h, w, 3), (255, 0, 255), dtype=np.uint8)
             for (task_y, task_x), part in pieces.items():
-                out_y = round(task_y * args.scale)
-                out_x = round(task_x * args.scale)
-                result[out_y:out_y + part.shape[0], out_x:out_x + part.shape[1]] = part
+                result[task_y:task_y + part.shape[0], task_x:task_x + part.shape[1]] = part
             print(f"[PARTIAL IMAGE] {len(failed_tasks)} task region(s) highlighted magenta.")
         else:
-            result = stitch_tile_pieces(pieces, h, w, args.scale)
+            result = stitch_tile_pieces(pieces, h, w)
         stitching_seconds = time.perf_counter() - stitching_started
     elapsed = time.perf_counter() - started
-    output_suffix = f"nlm_sw{args.nlm_search_window}" if args.operation == "nlm" else f"{args.scale:.1f}x"
-    path = Path(args.output) / f"{Path(args.input).stem}_{output_suffix}.png"
+    # In sequential mode this run is the baseline itself. Show its measured
+    # duration and the expected 1x / 100% single-process reference values.
+    if args.mode == "sequential":
+        baseline_seconds = elapsed
+    path = Path(args.output) / f"{original_path.stem}-after.png"
     save_image(path, result)
     status = "PARTIAL" if failed_tasks else "COMPLETE"
-    print(f"[MASTER] status={status} operation={args.operation} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
+    print(f"[MASTER] status={status} output={path} shape={result.shape} checksum={checksum(result)} elapsed={elapsed:.3f}s")
     throughput = h * w / elapsed if elapsed else 0.0
-    operation_report = (
-        f"NLM denoising (search window={args.nlm_search_window}, h=3, hColor=3, template=7)"
-        if args.operation == "nlm" else f"Upscale (factor={args.scale}x)"
+    report = [
+        "Distributed NLM Image Denoising - Benchmark Report",
+        f"Master: {socket.gethostname()}",
+        f"Original image: {original_path}",
+        f"Noisy input: {before_path}",
+        f"Resolution: {w}x{h}",
+        f"Gaussian noise: sigma={args.noise_sigma:g}, seed={args.noise_seed}",
+        f"Noise preparation: {noise_preparation_seconds:.6f}s (excluded from T_run)",
+        f"NLM parameters: search_window={args.nlm_search_window}, h={args.nlm_h:g}, hColor={args.nlm_h_color:g}, template=7",
+        f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}",
+        f"Output: {path}", f"Execution time: {elapsed:.6f}s",
+        f"Throughput: {throughput:.3f} input-pixels/s",
+    ]
+    parallelism = (
+        1 if args.mode == "sequential"
+        else planned_worker_count if args.mode == "distributed"
+        else (multiprocessing.cpu_count() or 1)
     )
-    report = ["Distributed Image Processing - Benchmark Report", f"Master: {socket.gethostname()}", f"Input: {args.input}", f"Resolution: {w}x{h}", f"Operation: {operation_report}", f"Mode: {args.mode}", f"Scheduler: {args.scheduler}", f"Status: {status}", f"Output: {path}", f"Execution time: {elapsed:.6f}s", f"Throughput: {throughput:.3f} input-pixels/s"]
-    parallelism = planned_worker_count if args.mode == "distributed" else (multiprocessing.cpu_count() or 1)
     speedup = baseline_seconds / elapsed if baseline_seconds is not None and elapsed else None
     efficiency = speedup / max(1, parallelism) * 100 if speedup is not None else None
-    analysis_rows = [("Operation", operation_report), ("Execution mode", args.mode), ("Scheduler", args.scheduler), ("Worker nodes", str(planned_worker_count)), ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"), ("T_run", f"{elapsed:.3f}s"), ("Speedup", f"{speedup:.3f}x" if speedup is not None else "n/a"), ("Efficiency", f"{efficiency:.2f}% (P={parallelism})" if efficiency is not None else "n/a"), ("Throughput", f"{throughput:.2f} input-pixels/s")]
+    analysis_rows = [
+        ("Operation", "NLM denoising"),
+        ("Input", f"{original_path.name} -> {before_path.name}"),
+        ("Gaussian noise sigma", f"{args.noise_sigma:g} (seed={args.noise_seed})"),
+        ("Noise preparation", f"{noise_preparation_seconds:.3f}s; excluded from T_run"),
+        ("NLM search window", str(args.nlm_search_window)),
+        ("NLM strength h/hColor", f"{args.nlm_h:g}/{args.nlm_h_color:g}"),
+        ("Execution mode", args.mode),
+        ("Scheduler", args.scheduler),
+        ("Worker nodes", str(planned_worker_count)),
+        ("T_seq", f"{baseline_seconds:.3f}s" if baseline_seconds is not None else "baseline run"),
+        ("T_run", f"{elapsed:.3f}s"),
+        ("Speedup", f"{speedup:.3f}x" if speedup is not None else "n/a"),
+        ("Efficiency", f"{efficiency:.2f}% (P={parallelism})" if efficiency is not None else "n/a"),
+        ("Throughput", f"{throughput:.2f} input-pixels/s"),
+    ]
     print("\n[OVERALL ANALYSIS]")
     print(f"{'METRIC':<24} VALUE")
     report.extend(["", "OVERALL ANALYSIS", f"{'METRIC':<24} VALUE"])
@@ -816,7 +836,7 @@ def main() -> None:
     report.extend(failure_events)
     log_dir = Path("logs"); log_dir.mkdir(parents=True, exist_ok=True)
     safe_master = "".join(c if c.isalnum() or c in "-_" else "_" for c in socket.gethostname())
-    log_name = f"{safe_master}_{w}x{h}_{output_suffix}_{args.mode}_{args.scheduler}_{len(workers) if args.mode == 'distributed' else 0}workers_{time.strftime('%Y%m%d-%H%M%S')}.txt"
+    log_name = f"{safe_master}_{w}x{h}_nlm_sigma{args.noise_sigma:g}_sw{args.nlm_search_window}_{args.mode}_{args.scheduler}_{len(workers) if args.mode == 'distributed' else 0}workers_{time.strftime('%Y%m%d-%H%M%S')}.txt"
     log_path = log_dir / log_name
     log_path.write_text("\n".join(report) + "\n", encoding="utf-8")
     print(f"[LOG] benchmark report saved: {log_path}")
