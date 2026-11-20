@@ -1,0 +1,90 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 3.2x
+Mode: distributed
+Scheduler: static
+Status: COMPLETE
+Output: after/anime_3.2x.png
+Execution time: 111.997995s
+Throughput: 37449.813 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                static
+Worker nodes             2
+T_seq                    1.339s
+T_run                    111.998s
+Speedup                  0.012x
+Efficiency               0.60% (P=2)
+Throughput               37449.81 input-pixels/s
+
+T_RUN PHASE WALL TIMES - NETWORK EXCLUDES COMPUTE OVERLAP
+PHASE                             WALL TIME
+Network (all Workers)              107.257s
+Pure compute (all Workers)           2.361s
+Other                                2.380s
+T_run total                        111.998s
+
+WORKER PERFORMANCE
+WORKER                 TASKS FAILED    NETWORK   COMPUTE     OTHER    ACTIVE   AVG CPU   AVG RAM   TASK MB  RESULT MB  RETRY
+localhost                 18      3   106.616s    1.661s    0.744s  109.021s     14.5%     73.3%    10.52    107.65      7
+DESKTOP-F40ABI3           14      7    66.587s    0.733s    0.323s   67.642s     23.7%     32.7%     8.16     83.50      3
+
+TASK TIMINGS - NETWORK EXCLUDES COMPUTE OVERLAP
+TASK       WORKER                 ROWS            STATUS                          TASK MB  RESULT MB    NETWORK  NETWORK MB/S   COMPUTE     OTHER  TOTAL TIME
+81024977   localhost              448..511        REROUTED TO DESKTOP-F40ABI3       0.59      6.04    22.427s          0.30    0.000s    4.254s     26.681s
+cc0231b7   DESKTOP-F40ABI3        1216..1279      REROUTED TO localhost             0.59      6.04    24.711s          0.27    0.066s   15.381s     40.157s
+33c2a8f4   localhost              192..255        SUCCESS                           0.59      6.04     7.551s          0.88    0.123s    0.251s      7.925s
+bfc3b0ab   DESKTOP-F40ABI3        768..831        REROUTED TO localhost             0.59      6.04     4.396s          1.51    0.100s    0.256s      4.752s
+1caa4b33   localhost              1856..1919      REROUTED TO DESKTOP-F40ABI3       0.59      6.04     2.849s          2.33    0.097s    0.255s      3.202s
+6bf6ae1f   DESKTOP-F40ABI3        1088..1151      REROUTED TO localhost             0.59      6.04     7.623s          0.87    0.000s    1.496s      9.118s
+41cdb675   DESKTOP-F40ABI3        896..959        REROUTED TO localhost             0.59      6.04    11.636s          0.57    0.132s    0.381s     12.149s
+e7beaf30   DESKTOP-F40ABI3        1152..1215      REROUTED TO localhost             0.59      6.04     3.587s          1.85    0.091s    1.350s      5.029s
+4742b2e5   localhost              704..767        REROUTED TO DESKTOP-F40ABI3       0.59      6.04     1.240s          5.34    0.102s    0.230s      1.571s
+fba6c870   localhost              1984..2047      SUCCESS                           0.49      5.03     7.768s          0.71    0.081s    0.320s      8.169s
+599dd474   DESKTOP-F40ABI3        256..319        REROUTED TO localhost             0.59      6.04     4.419s          1.50    0.097s    0.430s      4.946s
+b83d0b05   localhost              64..127         SUCCESS                           0.59      6.04    15.014s          0.44    0.106s    0.234s     15.355s
+8cb29e07   DESKTOP-F40ABI3        1024..1087      REROUTED TO localhost             0.59      6.04     3.750s          1.77    0.100s    0.445s      4.295s
+6dd7c100   localhost              1344..1407      SUCCESS                           0.59      6.04    95.702s          0.07    0.144s    0.417s     96.264s
+ef2b6eea   DESKTOP-F40ABI3        1920..1983      SUCCESS                           0.59      6.04    22.877s          0.29    0.000s    4.156s     27.033s
+05e1a5ae   DESKTOP-F40ABI3        640..703        SUCCESS                           0.59      6.04    63.013s          0.11    0.000s    3.666s     66.680s
+604088f7   localhost              1472..1535      SUCCESS                           0.59      6.04    46.042s          0.14    0.118s    0.265s     46.425s
+e360165d   DESKTOP-F40ABI3        128..191        SUCCESS                           0.59      6.04    21.024s          0.32    0.182s    7.799s     29.005s
+92dd92c9   localhost              576..639        SUCCESS                           0.59      6.04    56.945s          0.12    0.094s    0.276s     57.316s
+4ae8ae64   DESKTOP-F40ABI3        1408..1471      SUCCESS                           0.59      6.04    45.570s          0.15    0.111s    5.248s     50.929s
+2703ecce   DESKTOP-F40ABI3        1792..1855      SUCCESS                           0.59      6.04    24.343s          0.27    0.000s    3.931s     28.274s
+1eab888c   DESKTOP-F40ABI3        512..575        SUCCESS                           0.59      6.04    33.960s          0.20    0.000s    5.086s     39.046s
+60d58903   DESKTOP-F40ABI3        1280..1343      SUCCESS                           0.59      6.04    22.022s          0.30    0.142s    6.286s     28.451s
+59a5c7f2   localhost              1728..1791      SUCCESS                           0.59      6.04    48.804s          0.14    0.101s    0.267s     49.172s
+57641d45   DESKTOP-F40ABI3        0..63           SUCCESS                           0.49      5.03    21.007s          0.26    0.000s    6.346s     27.354s
+726360a9   DESKTOP-F40ABI3        1664..1727      SUCCESS                           0.59      6.04    52.027s          0.13    0.096s    7.519s     59.641s
+490908e5   DESKTOP-F40ABI3        384..447        SUCCESS                           0.59      6.04    33.515s          0.20    0.000s    3.918s     37.433s
+e3a7a1dd   localhost              1600..1663      SUCCESS                           0.59      6.04    77.869s          0.09    0.102s    0.252s     78.224s
+a758ce2e   localhost              960..1023       SUCCESS                           0.59      6.04    20.662s          0.32    0.112s    0.269s     21.043s
+865e24df   localhost              320..383        SUCCESS                           0.59      6.04    88.971s          0.07    0.104s    0.292s     89.367s
+260c7168   DESKTOP-F40ABI3        1536..1599      SUCCESS                           0.59      6.04    54.219s          0.12    0.099s    5.328s     59.646s
+faef8e27   localhost              832..895        SUCCESS                           0.59      6.04    20.660s          0.32    0.121s    1.275s     22.057s
+[RECOVERY] retries=10 recovery_time=111.901s
+[WORKER BUSY] task=81024977f76147f1aafd06147cf56884 worker=localhost@192.168.1.104 reason=WorkerBusyError: localhost rejected task: all process slots are busy
+[RETRY] task=81024977f76147f1aafd06147cf56884 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[WORKER BUSY] task=cc0231b797704d828e8c247ecd9572c1 worker=DESKTOP-F40ABI3@192.168.1.10 reason=WorkerBusyError: DESKTOP-F40ABI3 rejected task: all process slots are busy
+[RETRY] task=cc0231b797704d828e8c247ecd9572c1 attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=bfc3b0ab3c20438dbfc76b3a3f535720 worker=DESKTOP-F40ABI3@192.168.1.10 reason=TimeoutError: timed out
+[RETRY] task=bfc3b0ab3c20438dbfc76b3a3f535720 attempt=1 target=localhost@192.168.1.104
+[WORKER BUSY] task=1caa4b334b734d38b016808013c2604d worker=localhost@192.168.1.104 reason=WorkerBusyError: localhost rejected task: all process slots are busy
+[RETRY] task=1caa4b334b734d38b016808013c2604d attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[WORKER BUSY] task=6bf6ae1f072543049e4708d40853fab5 worker=DESKTOP-F40ABI3@192.168.1.10 reason=WorkerBusyError: DESKTOP-F40ABI3 rejected task: all process slots are busy
+[RETRY] task=6bf6ae1f072543049e4708d40853fab5 attempt=1 target=localhost@192.168.1.104
+[WORKER BUSY] task=41cdb6755a334426a64647d64914c48b worker=DESKTOP-F40ABI3@192.168.1.10 reason=WorkerBusyError: DESKTOP-F40ABI3 rejected task: all process slots are busy
+[RETRY] task=41cdb6755a334426a64647d64914c48b attempt=1 target=localhost@192.168.1.104
+[WORKER BUSY] task=e7beaf30772140ac97581a864da69932 worker=DESKTOP-F40ABI3@192.168.1.10 reason=WorkerBusyError: DESKTOP-F40ABI3 rejected task: all process slots are busy
+[RETRY] task=e7beaf30772140ac97581a864da69932 attempt=1 target=localhost@192.168.1.104
+[WORKER BUSY] task=4742b2e5c238454ea88ad032fc2e9efa worker=localhost@192.168.1.104 reason=WorkerBusyError: localhost rejected task: all process slots are busy
+[RETRY] task=4742b2e5c238454ea88ad032fc2e9efa attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[WORKER BUSY] task=599dd474ca994cefa6f808e81e59d513 worker=DESKTOP-F40ABI3@192.168.1.10 reason=WorkerBusyError: DESKTOP-F40ABI3 rejected task: all process slots are busy
+[RETRY] task=599dd474ca994cefa6f808e81e59d513 attempt=1 target=localhost@192.168.1.104
+[WORKER BUSY] task=8cb29e07bf4c4d048347a0468f016d16 worker=DESKTOP-F40ABI3@192.168.1.10 reason=WorkerBusyError: DESKTOP-F40ABI3 rejected task: all process slots are busy
+[RETRY] task=8cb29e07bf4c4d048347a0468f016d16 attempt=1 target=localhost@192.168.1.104

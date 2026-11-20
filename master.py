@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import psutil
 
-from config import DEFAULT_PORT, DISCOVERY_PORT, MAX_SCALE, MIN_SCALE, PROTOCOL_VERSION, SOCKET_TIMEOUT
+from config import DEFAULT_OVERLAP, DEFAULT_PORT, DEFAULT_TILE_SIZE, DISCOVERY_PORT, MAX_SCALE, MIN_SCALE, PROTOCOL_VERSION, SOCKET_TIMEOUT
 from image_pipeline import checksum, process_slice, read_image, save_image
 from protocol import recv_bytes, recv_json, send_bytes, send_json
 
@@ -43,6 +43,36 @@ def interval_union_seconds(intervals: list[tuple[float, float]]) -> float:
             total += end - start
             start, end = next_start, next_end
     return total + end - start
+
+
+def subtract_intervals(
+    intervals: list[tuple[float, float]],
+    occupied: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Return interval portions not covered by the occupied intervals."""
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted((a, b) for a, b in occupied if b > a):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    remaining: list[tuple[float, float]] = []
+    for start, end in intervals:
+        cursor = start
+        for block_start, block_end in merged:
+            if block_end <= cursor:
+                continue
+            if block_start >= end:
+                break
+            if block_start > cursor:
+                remaining.append((cursor, min(block_start, end)))
+            cursor = max(cursor, block_end)
+            if cursor >= end:
+                break
+        if cursor < end:
+            remaining.append((cursor, end))
+    return remaining
 
 
 def clip_intervals(
@@ -176,9 +206,62 @@ def remote_task(worker: dict, task: dict, scale: float, timeout: float = SOCKET_
     return response, result
 
 
+def empty_worker_stats(host: str) -> dict:
+    return {
+        "host": host, "tasks": 0, "failed": 0, "compute": 0.0,
+        "task_total": 0.0, "other": 0.0, "worker_elapsed": 0.0,
+        "cpu": [], "memory": [], "bytes": 0, "retries": 0,
+        "connect": 0.0, "upload": 0.0, "busy_wait": 0.0,
+        "worker_wait": 0.0, "download": 0.0,
+        "network_bytes_in": 0, "network_bytes_out": 0,
+        "compute_intervals": [], "upload_intervals": [],
+        "download_intervals": [], "active_intervals": [],
+        "master_upload_intervals": [], "master_download_intervals": [],
+        "master_compute_intervals": [], "master_active_intervals": [],
+    }
+
+
 def local_piece(args: tuple[bytes, tuple[int, ...], float]) -> np.ndarray:
     raw, shape, scale = args
     return process_slice(np.frombuffer(raw, dtype=np.uint8).reshape(shape).copy(), scale)
+
+
+def crop_tile_core(part: np.ndarray, task: dict, scale: float) -> np.ndarray:
+    """Crop context from a processed tile using global output coordinates."""
+    out_x0 = round(task["x"] * scale)
+    out_x1 = round(task["x_end"] * scale)
+    out_y0 = round(task["y"] * scale)
+    out_y1 = round(task["y_end"] * scale)
+    context_out_x0 = round(task["context_x0"] * scale)
+    context_out_y0 = round(task["context_y0"] * scale)
+    expected_width = out_x1 - out_x0
+    expected_height = out_y1 - out_y0
+    left = out_x0 - context_out_x0
+    top = out_y0 - context_out_y0
+    right = left + expected_width
+    bottom = top + expected_height
+
+    # cv2.resize rounds each tile's output dimensions independently. Correct a
+    # possible one-pixel rounding difference at the outer image boundaries.
+    if left < 0:
+        right -= left
+        left = 0
+    if top < 0:
+        bottom -= top
+        top = 0
+    if right > part.shape[1]:
+        left -= right - part.shape[1]
+        right = part.shape[1]
+    if bottom > part.shape[0]:
+        top -= bottom - part.shape[0]
+        bottom = part.shape[0]
+
+    core = part[top:bottom, left:right]
+    if core.shape[:2] != (expected_height, expected_width):
+        raise ValueError(
+            f"tile core shape mismatch: expected {(expected_height, expected_width)}, got {core.shape[:2]}"
+        )
+    return core
 
 
 def main() -> None:
@@ -190,9 +273,11 @@ def main() -> None:
     parser.add_argument("--workers", type=int, help="limit discovered workers")
     parser.add_argument("--scheduler", choices=("dynamic", "static"), default="dynamic")
     parser.add_argument("--fault-tolerance", action=argparse.BooleanOptionalAction, default=None, help="retry failed tasks on another Worker")
-    parser.add_argument("--rows-per-task", type=int, default=0, help="set manually; 0 selects task count from detected process slots")
+    parser.add_argument("--tile-size", type=int, default=DEFAULT_TILE_SIZE, help="core width and height of each square image tile")
     parser.add_argument("--output", default="after")
     args = parser.parse_args()
+    if args.tile_size < 1:
+        parser.error("--tile-size must be at least 1")
     workers: list[dict] = []
     planned_worker_count = 0
     # No-argument launch is the guided terminal interface used for demos.
@@ -212,7 +297,7 @@ def main() -> None:
         while args.scale is None:
             try: args.scale = scale_arg(input("Upscale factor (1.0-10.0): ").strip())
             except (ValueError, argparse.ArgumentTypeError) as exc: print(f"Invalid scale: {exc}")
-        print("\nChoose execution mode:\n  1) Sequential baseline: one process on Master\n  2) Local parallel: multiple processes on Master\n  3) Distributed: selected Workers process strips concurrently")
+        print("\nChoose execution mode:\n  1) Sequential baseline: one process on Master\n  2) Local parallel: multiple processes on Master\n  3) Distributed: selected Workers process image tiles concurrently")
         modes = {"1": "sequential", "2": "local-parallel", "3": "distributed"}
         while args.mode not in modes.values(): args.mode = modes.get(input("Mode [1-3]: ").strip())
         if args.mode == "distributed":
@@ -235,7 +320,7 @@ def main() -> None:
                     except ValueError: print("Invalid selection; using all discovered Workers.")
             args.worker = [f"{w['ip']}:{w['port']}" for w in found]
             workers = found
-            print("Scheduler:\n  1) Dynamic: give a free Worker slot another task immediately\n  2) Static: assign all strips to Worker slots before processing")
+            print("Scheduler:\n  1) Dynamic: give the next task to whichever Worker slot finishes first\n  2) Static: preassign tasks to process slots; more slots means more assigned tasks")
             args.scheduler = "static" if input("Scheduler [1-2, default 1]: ").strip() == "2" else "dynamic"
             args.fault_tolerance = input("Enable fault tolerance? [y/N]: ").strip().lower() in ("y", "yes")
             print("[FAULT TOLERANCE] Y: failed tasks retry on another Worker, with waits for busy slots. N: no retry; processing continues and missing regions are saved in magenta.")
@@ -274,6 +359,7 @@ def main() -> None:
     failure_events: list[str] = []
     recovery_seconds = 0.0
     failed_tasks: list[dict] = []
+    tile_columns = tile_rows = task_count = 0
     started = time.perf_counter()
     task_preparation_seconds = 0.0
     parallel_wall_seconds = 0.0
@@ -283,30 +369,39 @@ def main() -> None:
     else:
         preparation_started = time.perf_counter()
         tasks = []
-        if args.rows_per_task > 0:
-            size = args.rows_per_task
-            task_count = (h + size - 1) // size
-        else:
-            process_slots = (sum(max(1, int(worker.get("slots", worker.get("cores", 1)))) for worker in workers)
-                             if args.mode == "distributed" else (multiprocessing.cpu_count() or 1))
-            # Create about two tasks per process slot for dynamic balancing,
-            # while keeping strips at least roughly 64 source rows tall.
-            task_count = min(max(1, process_slots * 2), max(1, (h + 63) // 64))
-            size = max(1, (h + task_count - 1) // task_count)
-        print(f"[TASK DECOMPOSITION] rows_per_task={size} task_count={(h + size - 1) // size} process_slots={process_slots if args.rows_per_task <= 0 else 'manual'}")
-        for y in range(0, h, size):
-            # Context rows reduce boundary artifacts; crop overlap after scaling.
-            lo, hi = max(0, y - 16), min(h, y + size + 16)
-            tasks.append({"id": uuid.uuid4().hex, "y": y, "end": min(h, y + size), "lo": lo, "image": image[lo:hi]})
+        process_slots = (sum(max(1, int(worker.get("slots", worker.get("cores", 1)))) for worker in workers)
+                         if args.mode == "distributed" else (multiprocessing.cpu_count() or 1))
+        tile_columns = (w + args.tile_size - 1) // args.tile_size
+        tile_rows = (h + args.tile_size - 1) // args.tile_size
+        task_count = tile_columns * tile_rows
+        print(
+            f"[TASK DECOMPOSITION] core_tile={args.tile_size}x{args.tile_size} "
+            f"grid={tile_columns}x{tile_rows} task_count={task_count} "
+            f"context={DEFAULT_OVERLAP}px process_slots={process_slots}"
+        )
+        for y in range(0, h, args.tile_size):
+            y_end = min(h, y + args.tile_size)
+            context_y0 = max(0, y - DEFAULT_OVERLAP)
+            context_y1 = min(h, y_end + DEFAULT_OVERLAP)
+            for x in range(0, w, args.tile_size):
+                x_end = min(w, x + args.tile_size)
+                context_x0 = max(0, x - DEFAULT_OVERLAP)
+                context_x1 = min(w, x_end + DEFAULT_OVERLAP)
+                tasks.append({
+                    "id": uuid.uuid4().hex,
+                    "x": x, "x_end": x_end,
+                    "y": y, "y_end": y_end,
+                    "context_x0": context_x0, "context_y0": context_y0,
+                    "image": image[context_y0:context_y1, context_x0:context_x1],
+                })
         task_preparation_seconds = time.perf_counter() - preparation_started
-        pieces: dict[int, np.ndarray] = {}
+        pieces: dict[tuple[int, int], np.ndarray] = {}
         parallel_started = time.perf_counter()
         if args.mode == "local-parallel":
             with concurrent.futures.ProcessPoolExecutor() as pool:
                 futures = {pool.submit(local_piece, (t["image"].tobytes(), t["image"].shape, args.scale)): t for t in tasks}
                 for f, t in futures.items():
-                    part = f.result(); top = round((t["y"] - t["lo"]) * args.scale); bottom = round((t["end"] - t["lo"]) * args.scale)
-                    pieces[t["y"]] = part[top:bottom]
+                    pieces[(t["y"], t["x"])] = crop_tile_core(f.result(), t, args.scale)
         else:
             print("[MASTER] workers=" + ", ".join(f"{w['host']}@{w['ip']}({w.get('cores', 1)} processes)" for w in workers))
             pending_tasks = list(tasks)
@@ -324,6 +419,8 @@ def main() -> None:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(slots)) as pool:
                 active = {}
                 def submit(worker, task):
+                    task.setdefault("assigned_worker", worker["host"])
+                    task.setdefault("assigned_worker_ip", worker["ip"])
                     active[pool.submit(remote_task, worker, task, args.scale)] = (worker, task)
                 if args.scheduler == "static":
                     assignments = [[] for _ in slots]
@@ -350,12 +447,18 @@ def main() -> None:
                             first_error = error
                             failed_worker = worker
                         if first_error is not None:
+                            task["failed_on"] = failed_worker["host"]
+                            failed_stats = worker_stats.setdefault(
+                                failed_worker["ip"], empty_worker_stats(failed_worker["host"])
+                            )
+                            failed_stats["failed"] += 1
                             event = "WORKER BUSY" if isinstance(first_error, WorkerBusyError) else "TASK FAILED"
                             failure_line = f"[{event}] task={task['id']} worker={failed_worker['host']}@{failed_worker['ip']} reason={type(first_error).__name__}: {first_error}"
                             print(failure_line); failure_events.append(failure_line)
                             if not args.fault_tolerance:
                                 workers = [w for w in workers if w["ip"] != failed_worker["ip"]]
                                 slots = [w for w in slots if w["ip"] != failed_worker["ip"]]
+                                task["status"] = "FAILED"
                                 failed_tasks.append(task); lost = True
                                 print(f"[PARTIAL] task={task['id']} marked missing; its output region will be highlighted")
                             else:
@@ -389,6 +492,7 @@ def main() -> None:
                                         print(wait_line); failure_events.append(wait_line)
                                         time.sleep(delay)
                                 if not recovered:
+                                    task["status"] = "FAILED"
                                     failed_tasks.append(task); lost = True
                                     print(f"[PARTIAL] task={task['id']} retry limit reached; output region will be highlighted")
                                 else:
@@ -397,18 +501,38 @@ def main() -> None:
                                     print(f"[RECOVERED] task={task['id']} completed_on={worker['host']} recovery={task_recovery:.3f}s")
                         if not lost:
                             transport = response.get("transport", {})
-                            stats = worker_stats.setdefault(worker["ip"], {"host": worker["host"], "tasks": 0, "compute": 0.0, "task_total": 0.0, "other": 0.0, "worker_elapsed": 0.0, "cpu": [], "memory": [], "bytes": 0, "retries": 0, "connect": 0.0, "upload": 0.0, "busy_wait": 0.0, "worker_wait": 0.0, "download": 0.0, "network_bytes_in": 0, "network_bytes_out": 0, "compute_intervals": [], "upload_intervals": [], "download_intervals": [], "active_intervals": [], "master_upload_intervals": [], "master_download_intervals": [], "master_compute_intervals": [], "master_active_intervals": []})
+                            task_window = [tuple(transport.get("task_interval", (0, 0)))]
+                            task_network_intervals = clip_intervals(
+                                [tuple(transport.get("upload_interval", (0, 0))),
+                                 tuple(transport.get("download_interval", (0, 0)))],
+                                task_window,
+                            )
+                            task_compute_intervals = clip_intervals(
+                                [tuple(transport.get("compute_interval", (0, 0)))],
+                                task_window,
+                            )
+                            task_compute = interval_union_seconds(task_compute_intervals)
+                            task_network = interval_union_seconds(
+                                subtract_intervals(task_network_intervals, task_compute_intervals)
+                            )
+                            task_total = float(transport.get("total", 0.0))
+                            task_other = max(0.0, task_total - task_network - task_compute)
+                            stats = worker_stats.setdefault(worker["ip"], empty_worker_stats(worker["host"]))
                             stats["tasks"] += 1
                             stats["compute"] += float(response.get("compute_seconds", 0.0))
                             stats["worker_elapsed"] += float(response.get("worker_elapsed", 0.0))
                             phase_intervals = response.get("phase_intervals", {})
-                            stats["master_upload_intervals"].append(tuple(transport.get("upload_interval", (0, 0))))
-                            stats["master_download_intervals"].append(tuple(transport.get("download_interval", (0, 0))))
-                            stats["master_compute_intervals"].append(tuple(transport.get("compute_interval", (0, 0))))
-                            stats["master_active_intervals"].append(tuple(transport.get("task_interval", (0, 0))))
+                            stats["master_upload_intervals"].extend(clip_intervals(
+                                [tuple(transport.get("upload_interval", (0, 0)))], task_window
+                            ))
+                            stats["master_download_intervals"].extend(clip_intervals(
+                                [tuple(transport.get("download_interval", (0, 0)))], task_window
+                            ))
+                            stats["master_compute_intervals"].extend(task_compute_intervals)
+                            stats["master_active_intervals"].extend(task_window)
                             stats["active_intervals"].append(tuple(phase_intervals.get("worker_interval", (0, 0))))
                             stats["task_total"] += float(transport.get("total", 0.0))
-                            stats["other"] += max(0.0, float(transport.get("total", 0.0)) - float(transport.get("upload", 0.0)) - float(response.get("compute_seconds", 0.0)) - float(transport.get("download", 0.0)))
+                            stats["other"] += task_other
                             for key in ("connect", "upload", "busy_wait", "worker_wait", "download"):
                                 stats[key] += float(transport.get(key, 0.0))
                             stats["network_bytes_in"] += int(transport.get("sent_bytes", task["image"].nbytes))
@@ -417,33 +541,49 @@ def main() -> None:
                             stats["memory"].append(float(response.get("memory_percent", 0.0)))
                             stats["bytes"] += int(task["image"].nbytes)
                             stats["retries"] += int(retried)
-                            detail = {"id": task["id"], "worker": worker["host"], "rows": f"{task['y']}..{task['end']-1}", "bytes_in": transport.get("sent_bytes", task["image"].nbytes), "bytes_out": transport.get("received_bytes", 0), "connect": transport.get("connect", 0), "upload": transport.get("upload", 0), "busy_wait": transport.get("busy_wait", 0), "worker_wait": transport.get("worker_wait", 0), "compute": response.get("compute_seconds", 0), "download": transport.get("download", 0), "total": transport.get("total", 0), "retried": retried}
-                            detail["network"] = detail["upload"] + detail["download"]
-                            detail["other"] = max(0.0, detail["total"] - detail["network"] - detail["compute"])
+                            if retried and worker["ip"] != task.get("assigned_worker_ip"):
+                                task_status = f"REROUTED TO {worker['host']}"
+                            elif retried:
+                                task_status = f"RETRIED ON {worker['host']}"
+                            else:
+                                task_status = "SUCCESS"
+                            task["status"] = task_status
+                            region = f"x={task['x']}..{task['x_end']-1},y={task['y']}..{task['y_end']-1}"
+                            detail = {"id": task["id"], "worker": task.get("assigned_worker", worker["host"]), "status": task_status, "region": region, "bytes_in": transport.get("sent_bytes", task["image"].nbytes), "bytes_out": transport.get("received_bytes", 0), "connect": transport.get("connect", 0), "upload": transport.get("upload", 0), "busy_wait": transport.get("busy_wait", 0), "worker_wait": transport.get("worker_wait", 0), "compute": response.get("compute_seconds", 0), "download": transport.get("download", 0), "total": transport.get("total", 0), "retried": retried}
+                            detail["network"] = task_network
+                            detail["network_intervals"] = task_network_intervals
+                            detail["compute"] = task_compute
+                            detail["other"] = task_other
                             task_details.append(detail)
-                            print(f"[TASK] {task['id'][:8]} -> {worker['host']} rows={detail['rows']} connect={detail['connect']:.3f}s network={detail['network']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s task_data={detail['bytes_in']/1e6:.2f}MB result_data={detail['bytes_out']/1e6:.2f}MB")
-                            top = round((task["y"] - task["lo"]) * args.scale); bottom = round((task["end"] - task["lo"]) * args.scale)
-                            pieces[task["y"]] = part[top:bottom]
+                            print(f"[TASK] {task['id'][:8]} -> {worker['host']} tile={region} connect={detail['connect']:.3f}s network={detail['network']:.3f}s busy_wait={detail['busy_wait']:.3f}s worker_wait={detail['worker_wait']:.3f}s compute={detail['compute']:.3f}s task_data={detail['bytes_in']/1e6:.2f}MB result_data={detail['bytes_out']/1e6:.2f}MB")
+                            pieces[(task["y"], task["x"])] = crop_tile_core(part, task, args.scale)
                             completed += 1
                         if args.scheduler == "dynamic" and pending_tasks and slots:
                             submit(worker if worker in slots else slots[0], pending_tasks.pop(0))
                 if pending_tasks:
                     if args.fault_tolerance:
                         raise RuntimeError("no active Worker slots for pending tasks")
+                    for task in pending_tasks:
+                        task["status"] = "FAILED (NO WORKER)"
                     failed_tasks.extend(pending_tasks)
                     print(f"[PARTIAL] {len(pending_tasks)} pending task(s) have no available Worker and will be highlighted")
                     pending_tasks.clear()
         parallel_wall_seconds = time.perf_counter() - parallel_started
         stitching_started = time.perf_counter()
+        output_shape = (round(h * args.scale), round(w * args.scale), 3)
         if failed_tasks:
-            output_shape = (round(h * args.scale), round(w * args.scale), 3)
             result = np.full(output_shape, (255, 0, 255), dtype=np.uint8)
-            for task_y, part in pieces.items():
+            for (task_y, task_x), part in pieces.items():
                 out_y = round(task_y * args.scale)
-                result[out_y:out_y + part.shape[0]] = part
+                out_x = round(task_x * args.scale)
+                result[out_y:out_y + part.shape[0], out_x:out_x + part.shape[1]] = part
             print(f"[PARTIAL IMAGE] {len(failed_tasks)} task region(s) highlighted magenta.")
         else:
-            result = np.vstack([pieces[y] for y in sorted(pieces)])
+            result = np.empty(output_shape, dtype=np.uint8)
+            for (task_y, task_x), part in pieces.items():
+                out_y = round(task_y * args.scale)
+                out_x = round(task_x * args.scale)
+                result[out_y:out_y + part.shape[0], out_x:out_x + part.shape[1]] = part
         stitching_seconds = time.perf_counter() - stitching_started
     elapsed = time.perf_counter() - started
     path = Path(args.output) / f"{Path(args.input).stem}_{args.scale:.1f}x.png"
@@ -468,27 +608,28 @@ def main() -> None:
         run_window = [(parallel_started, parallel_started + parallel_wall_seconds)]
         run_network = clip_intervals(all_network_intervals, run_window)
         run_compute = clip_intervals(all_compute_intervals, run_window)
-        all_network = interval_union_seconds(run_network)
         all_compute = interval_union_seconds(run_compute)
-        # Other is the balancing remainder: it includes setup/stitching and
-        # subtracts network/compute overlap so the phase rows add to T_run.
-        run_other = elapsed - all_network - all_compute
+        # Count network/compute overlap as compute time, not network time.
+        run_network = subtract_intervals(run_network, run_compute)
+        all_network = interval_union_seconds(run_network)
+        # Other is the unmeasured remainder, including preparation/stitching.
+        run_other = max(0.0, elapsed - all_network - all_compute)
         phase_rows = [
             ("Network (all Workers)", all_network),
             ("Pure compute (all Workers)", all_compute),
-            ("Other", run_other),
+            ("Other (whole job)", run_other),
             ("T_run total", elapsed),
         ]
-        print("\n[T_RUN PHASE WALL TIMES - OTHER INCLUDES OVERLAP ADJUSTMENT]")
+        print("\n[T_RUN PHASE WALL TIMES - NETWORK EXCLUDES COMPUTE OVERLAP]")
         phase_header = f"{'PHASE':<30} {'WALL TIME':>12}"
         print(phase_header)
-        report.extend(["", "T_RUN PHASE WALL TIMES - OTHER INCLUDES OVERLAP ADJUSTMENT", phase_header])
+        report.extend(["", "T_RUN PHASE WALL TIMES - NETWORK EXCLUDES COMPUTE OVERLAP", phase_header])
         for phase, seconds in phase_rows:
             line = f"{phase:<30} {seconds:>11.3f}s"
             print(line); report.append(line)
     if worker_stats:
-        header = f"{'WORKER':<22} {'TASKS':>5} {'NETWORK':>10} {'COMPUTE':>9} {'OTHER':>9} {'ACTIVE':>9} {'AVG CPU':>9} {'AVG RAM':>9} {'TASK MB':>9} {'RESULT MB':>10} {'RETRY':>6}"
-        print("\n[WORKER PHASE WALL TIMES - PER WORKER; MAY OVERLAP]")
+        header = f"{'WORKER':<22} {'TASKS':>5} {'FAILED':>6} {'NETWORK':>10} {'COMPUTE':>9} {'OTHER (WORKER)':>14} {'ACTIVE':>9} {'AVG CPU':>9} {'AVG RAM':>9} {'TASK MB':>9} {'RESULT MB':>10} {'RETRY':>6}"
+        print("\n[WORKER PHASE WALL TIMES - COMPUTE OVERLAP REMOVED]")
         print(header)
         report.extend(["", "WORKER PERFORMANCE", header])
         for stat in worker_stats.values():
@@ -498,20 +639,50 @@ def main() -> None:
             active = stat["master_active_intervals"]
             worker_network = clip_intervals(stat["master_upload_intervals"] + stat["master_download_intervals"], active)
             worker_compute = clip_intervals(stat["master_compute_intervals"], active)
+            # Use the same job-wide compute overlap removed from T_RUN.
+            worker_network = subtract_intervals(worker_network, run_compute)
             network_wall = interval_union_seconds(worker_network)
             compute_wall = interval_union_seconds(worker_compute)
-            covered_worker = interval_union_seconds(worker_network + worker_compute)
-            worker_other = max(0.0, worker_wall - covered_worker)
-            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {network_wall:>9.3f}s {compute_wall:>8.3f}s {worker_other:>8.3f}s {worker_wall:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>9.2f} {stat['retries']:>6}"
+            worker_other = max(0.0, worker_wall - network_wall - compute_wall)
+            row = f"{stat['host'][:22]:<22} {stat['tasks']:>5} {stat['failed']:>6} {network_wall:>9.3f}s {compute_wall:>8.3f}s {worker_other:>13.3f}s {worker_wall:>8.3f}s {avg_cpu:>8.1f}% {avg_mem:>8.1f}% {stat['network_bytes_in']/1e6:>8.2f} {stat['network_bytes_out']/1e6:>9.2f} {stat['retries']:>6}"
             print(row); report.append(row)
-    task_header = f"{'TASK':<10} {'WORKER':<22} {'ROWS':<15} {'TASK MB':>8} {'RESULT MB':>10} {'NETWORK':>10} {'NETWORK MB/S':>13} {'COMPUTE':>9} {'OTHER':>9} {'TOTAL TIME':>11}"
-    print("\n[TASK TIMINGS]"); print(task_header)
-    report.extend(["", "TASK TIMINGS", task_header])
+    detailed_ids = {item["id"] for item in task_details}
+    for task in failed_tasks:
+        if task["id"] in detailed_ids:
+            continue
+        task_details.append({
+            "id": task["id"],
+            "worker": task.get("assigned_worker", task.get("failed_on", "-")),
+            "status": task.get("status", "FAILED"),
+            "region": f"x={task['x']}..{task['x_end']-1},y={task['y']}..{task['y_end']-1}",
+            "bytes_in": task["image"].nbytes,
+            "bytes_out": None,
+            "network": None,
+            "compute": None,
+            "other": None,
+            "total": None,
+        })
+    task_header = f"{'TASK':<10} {'WORKER':<22} {'REGION':<27} {'STATUS':<30} {'TASK MB':>8} {'RESULT MB':>10} {'NETWORK':>10} {'NETWORK MB/S':>13} {'COMPUTE':>9} {'OTHER (TASK)':>12} {'TOTAL TIME':>11}"
+    print("\n[TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP]"); print(task_header)
+    report.extend(["", "TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP", task_header])
     for item in task_details:
         input_mb = item["bytes_in"] / 1e6
-        result_mb = item["bytes_out"] / 1e6
-        network_rate = (input_mb + result_mb) / item["network"] if item["network"] else 0.0
-        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['rows']:<15} {input_mb:>7.2f} {result_mb:>9.2f} {item['network']:>9.3f}s {network_rate:>12.2f} {item['compute']:>8.3f}s {item['other']:>8.3f}s {item['total']:>10.3f}s"
+        if item["bytes_out"] is None:
+            result_mb = network_rate = network = compute = other = total = "-"
+        else:
+            # Keep task Network on the same basis as the global T_RUN row:
+            # any concurrent Worker compute interval is excluded.
+            item["network"] = interval_union_seconds(
+                subtract_intervals(item["network_intervals"], run_compute)
+            )
+            item["other"] = max(0.0, item["total"] - item["network"] - item["compute"])
+            result_mb = f"{item['bytes_out'] / 1e6:.2f}"
+            network_rate = f"{(input_mb + item['bytes_out'] / 1e6) / item['network']:.2f}" if item["network"] else "0.00"
+            network = f"{item['network']:.3f}s"
+            compute = f"{item['compute']:.3f}s"
+            other = f"{item['other']:.3f}s"
+            total = f"{item['total']:.3f}s"
+        row = f"{item['id'][:8]:<10} {item['worker'][:22]:<22} {item['region']:<27} {item['status']:<30} {input_mb:>7.2f} {result_mb:>9} {network:>10} {network_rate:>13} {compute:>9} {other:>12} {total:>11}"
         print(row); report.append(row)
     recovery_line = f"[RECOVERY] retries={sum(x['retries'] for x in worker_stats.values())} recovery_time={recovery_seconds:.3f}s"
     print("\n" + recovery_line); report.append(recovery_line)

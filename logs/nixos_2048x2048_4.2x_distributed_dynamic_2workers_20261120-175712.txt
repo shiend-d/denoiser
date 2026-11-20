@@ -1,0 +1,70 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 4.2x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_4.2x.png
+Execution time: 91.150197s
+Throughput: 46015.304 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             2
+T_seq                    3.134s
+T_run                    91.150s
+Speedup                  0.034x
+Efficiency               1.72% (P=2)
+Throughput               46015.30 input-pixels/s
+
+T_RUN PHASE WALL TIMES - NETWORK EXCLUDES COMPUTE OVERLAP
+PHASE                             WALL TIME
+Network (all Workers)               88.287s
+Pure compute (all Workers)           2.601s
+Other                                0.262s
+T_run total                         91.150s
+
+WORKER PERFORMANCE
+WORKER                 TASKS FAILED    NETWORK   COMPUTE     OTHER    ACTIVE   AVG CPU   AVG RAM   TASK MB  RESULT MB  RETRY
+DESKTOP-F40ABI3           21      0    61.376s    2.101s    0.655s   64.132s     52.0%     33.7%    12.19    214.94      0
+localhost                 11      0    87.936s    1.339s    1.262s   90.538s     24.7%     74.0%     6.49    114.40      0
+
+TASK TIMINGS - NETWORK EXCLUDES JOB-WIDE COMPUTE OVERLAP
+TASK       WORKER                 ROWS            STATUS                          TASK MB  RESULT MB    NETWORK  NETWORK MB/S   COMPUTE     OTHER  TOTAL TIME
+e00df96b   DESKTOP-F40ABI3        0..63           SUCCESS                           0.49      8.67     3.234s          2.83    0.245s    2.813s      6.292s
+8cee9a8f   DESKTOP-F40ABI3        1024..1087      SUCCESS                           0.59     10.40     6.077s          1.81    0.236s    2.513s      8.826s
+6e04d3ce   DESKTOP-F40ABI3        768..831        SUCCESS                           0.59     10.40    10.389s          1.06    0.298s    1.719s     12.406s
+4362b605   localhost              960..1023       SUCCESS                           0.59     10.40    15.797s          0.70    0.358s    1.362s     17.517s
+63a40089   localhost              448..511        SUCCESS                           0.59     10.40    14.810s          0.74    0.456s    2.263s     17.529s
+9997acf7   localhost              832..895        SUCCESS                           0.59     10.40    20.030s          0.55    0.422s    1.299s     21.751s
+3e9bf93b   DESKTOP-F40ABI3        384..447        SUCCESS                           0.59     10.40    29.463s          0.37    0.273s    2.708s     32.444s
+67703997   DESKTOP-F40ABI3        128..191        SUCCESS                           0.59     10.40    28.250s          0.39    0.349s    5.708s     34.308s
+3467e61b   DESKTOP-F40ABI3        1152..1215      SUCCESS                           0.59     10.40    31.498s          0.35    0.252s    2.644s     34.394s
+886fe3f4   DESKTOP-F40ABI3        1216..1279      SUCCESS                           0.59     10.40    31.682s          0.35    0.226s    3.075s     34.983s
+422b2a42   DESKTOP-F40ABI3        1088..1151      SUCCESS                           0.59     10.40    32.826s          0.33    0.212s    4.362s     37.400s
+408971f4   DESKTOP-F40ABI3        896..959        SUCCESS                           0.59     10.40    35.074s          0.31    0.367s    2.936s     38.378s
+b8ea8895   DESKTOP-F40ABI3        256..319        SUCCESS                           0.59     10.40    36.079s          0.30    0.304s    2.368s     38.751s
+fdb6c885   DESKTOP-F40ABI3        1408..1471      SUCCESS                           0.59     10.40    21.569s          0.51    0.270s    5.598s     27.437s
+358023ce   DESKTOP-F40ABI3        640..703        SUCCESS                           0.59     10.40    38.710s          0.28    0.163s    2.647s     41.520s
+a3bf9098   DESKTOP-F40ABI3        512..575        SUCCESS                           0.59     10.40    39.398s          0.28    0.393s    1.929s     41.720s
+6e306454   localhost              704..767        SUCCESS                           0.59     10.40    44.100s          0.25    0.151s    2.256s     46.507s
+bb136010   localhost              1600..1663      SUCCESS                           0.59     10.40    25.722s          0.43    0.151s    1.296s     27.168s
+33fb75ba   DESKTOP-F40ABI3        1856..1919      SUCCESS                           0.59     10.40    11.102s          0.99    0.000s    3.507s     14.609s
+91eceef8   DESKTOP-F40ABI3        1728..1791      SUCCESS                           0.59     10.40    16.947s          0.65    0.287s    5.729s     22.964s
+c72163a8   DESKTOP-F40ABI3        1792..1855      SUCCESS                           0.59     10.40    19.679s          0.56    0.000s    5.489s     25.169s
+ed6ebdd3   DESKTOP-F40ABI3        1344..1407      SUCCESS                           0.59     10.40    40.015s          0.27    0.331s   10.406s     50.752s
+02dff108   DESKTOP-F40ABI3        1984..2047      SUCCESS                           0.49      8.67    18.882s          0.49    0.245s    4.484s     23.611s
+e1570ad9   DESKTOP-F40ABI3        1920..1983      SUCCESS                           0.59     10.40    20.861s          0.53    0.163s    4.355s     25.379s
+00079ae5   DESKTOP-F40ABI3        1664..1727      SUCCESS                           0.59     10.40    24.098s          0.46    0.000s    7.428s     31.526s
+580998cf   DESKTOP-F40ABI3        1280..1343      SUCCESS                           0.59     10.40    53.043s          0.21    0.000s    4.883s     57.926s
+13ed5ba3   localhost              64..127         SUCCESS                           0.59     10.40    67.866s          0.16    0.151s    3.411s     71.429s
+f0123326   localhost              320..383        SUCCESS                           0.59     10.40    68.495s          0.16    0.660s    2.366s     71.521s
+5165dd4a   localhost              192..255        SUCCESS                           0.59     10.40    71.959s          0.15    0.000s    3.881s     75.841s
+df3e2775   localhost              576..639        SUCCESS                           0.59     10.40    81.468s          0.13    0.244s    2.821s     84.534s
+36cd1c42   localhost              1472..1535      SUCCESS                           0.59     10.40    60.145s          0.18    0.000s    9.528s     69.673s
+31c0b85d   localhost              1536..1599      SUCCESS                           0.59     10.40    63.926s          0.17    0.000s    9.506s     73.432s
+[RECOVERY] retries=0 recovery_time=0.000s

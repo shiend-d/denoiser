@@ -1,0 +1,84 @@
+Distributed Image Upscaler - Benchmark Report
+Master: nixos
+Input: before/anime.png
+Resolution: 2048x2048
+Scale: 6.2x
+Mode: distributed
+Scheduler: dynamic
+Status: COMPLETE
+Output: after/anime_6.2x.png
+Execution time: 169.525630s
+Throughput: 24741.415 input-pixels/s
+
+OVERALL ANALYSIS
+METRIC                   VALUE
+Execution mode           distributed
+Scheduler                dynamic
+Worker nodes             2
+T_seq                    7.511s
+T_run                    169.526s
+Speedup                  0.044x
+Efficiency               2.22% (P=2)
+Throughput               24741.42 input-pixels/s
+
+T_RUN PHASE WALL TIMES - OTHER INCLUDES OVERLAP ADJUSTMENT
+PHASE                             WALL TIME
+Network (all Workers)              166.004s
+Pure compute (all Workers)           8.676s
+Other                               -5.154s
+T_run total                        169.526s
+
+WORKER PERFORMANCE
+WORKER                 TASKS    NETWORK   COMPUTE     OTHER    ACTIVE   AVG CPU   AVG RAM   TASK MB  RESULT MB  RETRY
+DESKTOP-F40ABI3           27   156.768s    6.487s    0.700s  159.312s     36.9%     34.2%    15.73    604.44      6
+localhost                  5   114.828s    2.188s    1.451s  117.598s     16.1%     71.2%     2.95    113.33      1
+
+TASK TIMINGS
+TASK       WORKER                 ROWS             TASK MB  RESULT MB    NETWORK  NETWORK MB/S   COMPUTE     OTHER  TOTAL TIME
+e334373b   DESKTOP-F40ABI3        896..959           0.59     22.67    14.664s         1.59    0.864s    4.246s     19.774s
+75c4a328   DESKTOP-F40ABI3        512..575           0.59     22.67    18.856s         1.23    1.120s    4.754s     24.730s
+18a0e90a   DESKTOP-F40ABI3        768..831           0.59     22.67    23.614s         0.98    1.236s    2.799s     27.649s
+9f1464f9   DESKTOP-F40ABI3        1152..1215         0.59     22.67    25.610s         0.91    0.461s    2.282s     28.353s
+93480633   DESKTOP-F40ABI3        640..703           0.59     22.67    23.411s         0.99    1.093s    9.402s     33.905s
+76314cb4   localhost              448..511           0.59     22.67    40.445s         0.57    0.992s    1.228s     42.665s
+cf409912   localhost              576..639           0.59     22.67    40.961s         0.57    0.906s    1.378s     43.245s
+63b49248   DESKTOP-F40ABI3        128..191           0.59     22.67    56.955s         0.41    1.097s    3.135s     61.188s
+a9b25395   DESKTOP-F40ABI3        256..319           0.59     22.67    62.181s         0.37    1.203s    5.271s     68.656s
+162eb2f2   DESKTOP-F40ABI3        1024..1087         0.59     22.67    61.333s         0.38    0.538s    8.387s     70.259s
+1d535bab   DESKTOP-F40ABI3        1344..1407         0.59     22.67    37.259s         0.62    0.349s    8.450s     46.058s
+08a90d24   DESKTOP-F40ABI3        1216..1279         0.59     22.67    68.465s         0.34    0.806s    2.498s     71.769s
+d31fcdef   DESKTOP-F40ABI3        384..447           0.59     22.67    67.931s         0.34    1.297s    4.538s     73.765s
+8dd1b626   DESKTOP-F40ABI3        0..63              0.49     18.89    70.081s         0.28    0.365s    4.542s     74.988s
+8cbbc2ed   localhost              1600..1663         0.59     22.67    33.197s         0.70    0.379s    1.415s     34.990s
+952fc522   DESKTOP-F40ABI3        1472..1535         0.59     22.67    57.607s         0.40    0.862s    1.970s     60.439s
+c7245982   DESKTOP-F40ABI3        1536..1599         0.59     22.67    52.114s         0.45    0.573s    5.485s     58.171s
+e7ad3d5e   DESKTOP-F40ABI3        1728..1791         0.59     22.67    17.916s         1.30    0.506s   12.480s     30.901s
+6a0f3a9e   DESKTOP-F40ABI3        1984..2047         0.49     18.89    11.243s         1.72    0.428s   18.626s     30.297s
+defd02dc   localhost              1664..1727         0.59     22.67    64.577s         0.36    0.403s    1.029s     66.010s
+a7d432cd   DESKTOP-F40ABI3        64..127            0.59     22.67    10.809s         2.15    0.409s    1.030s     12.249s
+4a0b01d7   DESKTOP-F40ABI3        320..383           0.59     22.67     5.401s         4.31    0.462s    0.609s      6.472s
+00bf7060   DESKTOP-F40ABI3        1280..1343         0.59     22.67    95.981s         0.24    0.355s   11.115s    107.451s
+72665649   DESKTOP-F40ABI3        1408..1471         0.59     22.67    87.642s         0.27    0.370s    5.596s     93.608s
+c15066fa   DESKTOP-F40ABI3        1920..1983         0.59     22.67    46.242s         0.50    0.644s    3.218s     50.104s
+5ce459c2   DESKTOP-F40ABI3        192..255           0.59     22.67     4.623s         5.03    0.355s    0.295s      5.273s
+491b7cd1   DESKTOP-F40ABI3        960..1023          0.59     22.67     4.633s         5.02    0.341s    0.321s      5.295s
+f4cea42f   DESKTOP-F40ABI3        1856..1919         0.59     22.67    55.875s         0.42    0.617s    2.209s     58.701s
+090b818c   DESKTOP-F40ABI3        704..767           0.59     22.67     5.198s         4.47    0.379s    0.237s      5.813s
+6eaebaf0   localhost              1088..1151         0.59     22.67     8.436s         2.76    0.326s    0.363s      9.125s
+f5e0de3f   DESKTOP-F40ABI3        832..895           0.59     22.67     4.425s         5.26    0.343s    0.354s      5.123s
+170895d6   DESKTOP-F40ABI3        1792..1855         0.59     22.67    59.066s         0.39    0.490s    6.318s     65.874s
+[RECOVERY] retries=7 recovery_time=49.350s
+[TASK FAILED] task=a7d432cd553844b18609cea46a0173ab worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=a7d432cd553844b18609cea46a0173ab attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=4a0b01d75ce24fa8ae2954283566ab0d worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=4a0b01d75ce24fa8ae2954283566ab0d attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=5ce459c2f4f840838d89673751830408 worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=5ce459c2f4f840838d89673751830408 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=491b7cd1461f411b92330ccaa4b856cf worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=491b7cd1461f411b92330ccaa4b856cf attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=090b818c80c94e69b3088cf2a570e348 worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=090b818c80c94e69b3088cf2a570e348 attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
+[TASK FAILED] task=6eaebaf08ed84e5caaef4245facbcd76 worker=DESKTOP-F40ABI3@192.168.1.10 reason=ConnectionError: peer closed the connection
+[RETRY] task=6eaebaf08ed84e5caaef4245facbcd76 attempt=1 target=localhost@192.168.1.104
+[TASK FAILED] task=f5e0de3f0955495f97dc39492d99f28a worker=localhost@192.168.1.104 reason=TimeoutError: timed out
+[RETRY] task=f5e0de3f0955495f97dc39492d99f28a attempt=1 target=DESKTOP-F40ABI3@192.168.1.10
